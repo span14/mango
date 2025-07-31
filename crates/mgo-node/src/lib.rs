@@ -2017,32 +2017,32 @@ pub fn apply_network_address_overrides(
     let mut modified_state = original_state.clone();
     
     // Get mutable access to validator infos
-    if let validator_infos = modified_state.get_validators_mut() {
-        for validator_info in validator_infos {
-            let validator_address = validator_info.mgo_address;
+    let validator_infos = modified_state.get_validators_mut();
+    for validator_info in validator_infos {
+        let validator_address = validator_info.mgo_address;
+        
+        if let Some(override_info) = overrides.get(&validator_address) {
+            info!(
+                "Applying network overrides for validator {}: updating addresses",
+                validator_address
+            );
             
-            if let Some(override_info) = overrides.get(&validator_address) {
-                info!(
-                    "Applying network overrides for validator {}: updating addresses",
-                    validator_address
-                );
-                
-                // Apply overrides for each address type if provided
-                if let Some(ref new_address) = override_info.mgo_net_address {
-                    validator_info.mgo_net_address = new_address.clone();
-                }
-                if let Some(ref new_address) = override_info.p2p_address {
-                    validator_info.p2p_address = new_address.clone();
-                }
-                if let Some(ref new_address) = override_info.narwhal_primary_address {
-                    validator_info.narwhal_primary_address = new_address.clone();
-                }
-                if let Some(ref new_address) = override_info.narwhal_worker_address {
-                    validator_info.narwhal_worker_address = new_address.clone();
-                }
+            // Apply overrides for each address type if provided
+            if let Some(ref new_address) = override_info.mgo_net_address {
+                validator_info.mgo_net_address = new_address.clone();
+            }
+            if let Some(ref new_address) = override_info.p2p_address {
+                validator_info.p2p_address = new_address.clone();
+            }
+            if let Some(ref new_address) = override_info.narwhal_primary_address {
+                validator_info.narwhal_primary_address = new_address.clone();
+            }
+            if let Some(ref new_address) = override_info.narwhal_worker_address {
+                validator_info.narwhal_worker_address = new_address.clone();
             }
         }
     }
+    
     
     Ok(modified_state)
 }

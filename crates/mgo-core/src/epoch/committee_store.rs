@@ -88,7 +88,7 @@ impl CommitteeStore {
         }
 
         // Remove committee decision after target epoch
-        store.tables.committee_map.multi_remove((target_epoch + 1..=max_epoch))?;
+        store.tables.committee_map.multi_remove(target_epoch + 1..=max_epoch)?;
         
         Ok(store)
     }

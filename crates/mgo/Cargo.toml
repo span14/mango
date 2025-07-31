@@ -49,6 +49,8 @@ mgo-source-validation.workspace = true
 mgo-move = { workspace = true, features = ["all"] }
 mgo-move-build.workspace = true
 mgo-protocol-config.workspace = true
+mgo-node.workspace = true
+mango-metrics.workspace = true
 shared-crypto.workspace = true
 mgo-replay.workspace = true
 

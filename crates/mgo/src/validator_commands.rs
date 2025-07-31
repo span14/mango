@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{anyhow, bail, Result};
+use mango_metrics::RegistryService;
 use move_core_types::ident_str;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, HashMap},
     fmt::{self, Debug, Display, Formatter, Write},
     fs,
     path::PathBuf,
-    time::Instant,
-    io::{self, Write as IoWrite}, 
 };
+use mgo_node::{MgoNode, NetworkAddressOverride};
+use mgo_config::{ NodeConfig, PersistedConfig};
 use mgo_genesis_builder::validator_info::GenesisValidatorInfo;
-
 use mgo_types::{
     base_types::{ObjectID, ObjectRef, MgoAddress},
     crypto::{AuthorityPublicKey, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID},
@@ -493,13 +493,6 @@ impl MgoValidatorCommand {
         network_mapping: Option<PathBuf>,
         config_path: Option<PathBuf>,
     ) -> Result<MgoValidatorCommandResponse> {
-        use std::fs;
-        use mgo_node::{MgoNode, NetworkAddressOverride};
-        use mango_metrics::RegistryService;
-        use std::collections::HashMap;
-        use mgo_config::{Config, NodeConfig, PersistedConfig};
-        use mgo_types::base_types::MgoAddress;
-
         // Load node configuration
         let config_path = config_path.unwrap_or_else(|| {
             mgo_config::mgo_config_dir()

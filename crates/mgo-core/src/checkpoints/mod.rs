@@ -751,7 +751,7 @@ impl CheckpointStore {
             CheckpointWatermark::HighestSynced,
             CheckpointWatermark::HighestExecuted,
         ] {
-            if let Some((seq, digest)) = self.watermarks.get(&watermark)? {
+            if let Some((seq, _digest)) = self.watermarks.get(&watermark)? {
                 if seq > target_seq {
                     batch.insert_batch(
                         &self.watermarks, 
