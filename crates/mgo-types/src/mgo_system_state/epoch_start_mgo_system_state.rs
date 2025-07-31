@@ -39,7 +39,7 @@ pub trait EpochStartSystemStateTrait {
 /// and fill them with None for older versions. When we absolutely must delete fields, we could
 /// also add new db tables to store the new version. This is OK because we only store one copy of
 /// this as part of EpochStartConfiguration for the most recent epoch in the db.
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 #[enum_dispatch(EpochStartSystemStateTrait)]
 pub enum EpochStartSystemState {
     V1(EpochStartSystemStateV1),
@@ -69,9 +69,15 @@ impl EpochStartSystemState {
     pub fn new_for_testing_with_epoch(epoch: EpochId) -> Self {
         Self::V1(EpochStartSystemStateV1::new_for_testing_with_epoch(epoch))
     }
+
+    pub fn get_validators_mut(&mut self) -> &mut Vec<EpochStartValidatorInfoV1> {
+        match self {
+            EpochStartSystemState::V1(state) => state.get_validators_mut(),
+        }
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartSystemStateV1 {
     epoch: EpochId,
     protocol_version: u64,
@@ -97,6 +103,10 @@ impl EpochStartSystemStateV1 {
             epoch_duration_ms: 1000,
             active_validators: vec![],
         }
+    }
+
+    pub fn get_validators_mut(&mut self) -> &mut Vec<EpochStartValidatorInfoV1> {
+        &mut self.active_validators
     }
 }
 
@@ -260,7 +270,7 @@ impl EpochStartSystemStateTrait for EpochStartSystemStateV1 {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartValidatorInfoV1 {
     pub mgo_address: MgoAddress,
     pub protocol_pubkey: narwhal_crypto::PublicKey,

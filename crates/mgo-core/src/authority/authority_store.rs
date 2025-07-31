@@ -171,6 +171,44 @@ impl AuthorityStore {
         Ok(this)
     }
 
+    pub async fn restore_authority(
+        perpetual_tables: Arc<AuthorityPerpetualTables>,
+        genesis: &Genesis,
+        indirect_objects_threshold: usize,
+        enable_epoch_mgo_conservation_check: bool,
+        registry: &Registry,
+        target_epoch: EpochId,
+    ) -> MgoResult<Arc<Self>> {
+        info!("Restoring epoch start config from DB");
+        let epoch_start_configuration = perpetual_tables
+            .epoch_start_configuration
+            .get(&())?
+            .expect("Epoch start configuration must be set in non-empty DB");
+        let cur_epoch = perpetual_tables.get_recovery_epoch_at_restart()?;
+        info!("Epoch start config: {:?}", epoch_start_configuration);
+        info!("Cur epoch: {:?}", cur_epoch);
+        if cur_epoch != target_epoch {
+            return Err(MgoError::Rollback (
+                format!(
+                    "Current epoch {} does not match target epoch {} in authority_store",
+                    cur_epoch, target_epoch
+                ),
+            ));
+        }
+        let this = Self::open_inner(
+            genesis,
+            perpetual_tables,
+            indirect_objects_threshold,
+            enable_epoch_mgo_conservation_check,
+            registry,
+        )
+        .await?;
+        this.update_epoch_flags_metrics(&[], epoch_start_configuration.flags());
+        Ok(this)
+    }
+
+    
+
     pub fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]) {
         for flag in old {
             self.metrics

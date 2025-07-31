@@ -422,7 +422,7 @@
 
     <b>let</b> p = b"mrc-721";
     <b>let</b> na = b"{name}";
-    <b>let</b> typ = b"{type}";
+    <b>let</b> typ = b"{typ}";
     <b>let</b> copr = b"{copyright}";
 
     <b>let</b> img_metadata = <a href="svg.md#0x4_svg_generate_singlescription_svg">svg::generate_singlescription_svg</a>(p, na, typ, copr);

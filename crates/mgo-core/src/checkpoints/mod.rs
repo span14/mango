@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use mgo_macros::fail_point;
 use mgo_network::default_mango_network_config;
 use mgo_types::base_types::ConciseableName;
+use mgo_types::error::MgoError;
 use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemStateTrait;
 
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
@@ -663,6 +664,105 @@ impl CheckpointStore {
             std::iter::once(CheckpointWatermark::HighestExecuted),
         )?;
         wb.write()?;
+        Ok(())
+    }
+
+    /// Rollback checkpoint store to target epoch by removing all checkpoints after the target epoch's last checkpoint
+    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<()> {
+        info!("Rolling back CheckpointStore to epoch {}", target_epoch);
+        
+        // Get the last checkpoint of the target epoch
+        let target_last_checkpoint = self
+            .get_epoch_last_checkpoint(target_epoch)?
+            .ok_or_else(|| MgoError::Rollback(format!(
+                "No last checkpoint found for target epoch {}",
+                target_epoch
+            )))?;
+        
+        let target_seq = *target_last_checkpoint.sequence_number();
+        info!("Target epoch {} ends at checkpoint {}", target_epoch, target_seq);
+        
+        let mut batch = self.certified_checkpoints.batch();
+        let mut checkpoints_to_remove = Vec::new();
+        let mut contents_to_remove = Vec::new();
+        let mut epochs_to_remove = Vec::new();
+        
+        // Remove certified checkpoints after target sequence
+        for result in self.certified_checkpoints.unbounded_iter() {
+            let (seq, checkpoint) = result;
+            if seq > target_seq {
+                checkpoints_to_remove.push(seq);
+                batch.delete_batch(&self.checkpoint_by_digest, std::iter::once(checkpoint.into_inner().digest()))?;
+            }
+        }
+        
+        // Remove checkpoint contents after target sequence
+        for result in self.checkpoint_sequence_by_contents_digest.unbounded_iter() {
+            let (digest, seq) = result;
+            if seq > target_seq {
+                contents_to_remove.push(digest);
+            }
+        }
+        
+        // Remove full checkpoint contents after target sequence
+        for result in self.full_checkpoint_content.unbounded_iter() {
+            let (seq, _) = result;
+            if seq > target_seq {
+                batch.delete_batch(&self.full_checkpoint_content, std::iter::once(&seq))?;
+            }
+        }
+        
+        // Remove locally computed checkpoints after target sequence
+        for result in self.locally_computed_checkpoints.unbounded_iter() {
+            let (seq, _) = result;
+            if seq > target_seq {
+                batch.delete_batch(&self.locally_computed_checkpoints, std::iter::once(&seq))?;
+            }
+        }
+        
+        // Remove epoch last checkpoint mappings for epochs after target
+        for result in self.epoch_last_checkpoint_map.unbounded_iter() {
+            let (epoch_id, _) = result;
+            if epoch_id > target_epoch {
+                epochs_to_remove.push(epoch_id);
+            }
+        }
+        
+        // Execute deletions
+        if !checkpoints_to_remove.is_empty() {
+            info!("Removing {} certified checkpoints", checkpoints_to_remove.len());
+            batch.delete_batch(&self.certified_checkpoints, checkpoints_to_remove.iter())?;
+        }
+        
+        if !contents_to_remove.is_empty() {
+            info!("Removing {} checkpoint contents", contents_to_remove.len());
+            batch.delete_batch(&self.checkpoint_content, contents_to_remove.iter())?;
+            batch.delete_batch(&self.checkpoint_sequence_by_contents_digest, contents_to_remove.iter())?;
+        }
+        
+        if !epochs_to_remove.is_empty() {
+            info!("Removing epoch mappings for {} epochs", epochs_to_remove.len());
+            batch.delete_batch(&self.epoch_last_checkpoint_map, epochs_to_remove.iter())?;
+        }
+        
+        // Update watermarks to not exceed target checkpoint
+        for watermark in [
+            CheckpointWatermark::HighestVerified,
+            CheckpointWatermark::HighestSynced,
+            CheckpointWatermark::HighestExecuted,
+        ] {
+            if let Some((seq, digest)) = self.watermarks.get(&watermark)? {
+                if seq > target_seq {
+                    batch.insert_batch(
+                        &self.watermarks, 
+                        std::iter::once((watermark, (target_seq, *target_last_checkpoint.digest())))
+                    )?;
+                }
+            }
+        }
+        
+        batch.write()?;
+        info!("Successfully rolled back CheckpointStore to epoch {}", target_epoch);
         Ok(())
     }
 

@@ -54,6 +54,46 @@ impl CommitteeStore {
         store
     }
 
+    pub fn restore_committee(path: PathBuf, target_epoch: EpochId, db_options: Option<Options>) -> MgoResult<Self> {
+        let tables = CommitteeStoreTables::open_tables_read_write(
+            path,
+            MetricConf::new("committee"),
+            db_options,
+            None,
+        );
+
+        let max_epoch = tables.committee_map
+            .unbounded_iter()
+            .map(|(id, _)| id)
+            .max()
+            .unwrap_or(0);
+
+        // TODO: restore the cache by [EPOCH_ID - n, EPOCH_ID]
+        let store = Self {
+            tables,
+            cache: RwLock::new(HashMap::new()),
+        };
+
+        if target_epoch > max_epoch {
+            return Err(MgoError::GenericAuthorityError {
+                error: format!(
+                    "Cannot rollback to future epoch {} in CommitteeStore. Maximum existing epoch is {}",
+                    target_epoch, max_epoch
+                ),
+            });
+        }
+
+        if store.get_committee(&target_epoch)?.is_none() {
+            return Err(MgoError::MissingCommitteeAtEpoch(target_epoch));
+        }
+
+        // Remove committee decision after target epoch
+        store.tables.committee_map.multi_remove((target_epoch + 1..=max_epoch))?;
+        
+        Ok(store)
+    }
+
+
     pub fn new_for_testing(genesis_committee: &Committee) -> Self {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("DB_{:?}", nondeterministic!(ObjectID::random())));

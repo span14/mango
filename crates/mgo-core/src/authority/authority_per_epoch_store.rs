@@ -51,8 +51,8 @@ use super::epoch_start_configuration::EpochStartConfigTrait;
 use crate::authority::epoch_start_configuration::{EpochFlag, EpochStartConfiguration};
 use crate::authority::ResolverWrapper;
 use crate::checkpoints::{
-    BuilderCheckpointSummary, CheckpointCommitHeight, CheckpointServiceNotify, EpochStats,
-    PendingCheckpoint, PendingCheckpointInfo,
+    BuilderCheckpointSummary, CheckpointCommitHeight, CheckpointServiceNotify, CheckpointStore,
+    EpochStats, PendingCheckpoint, PendingCheckpointInfo,
 };
 
 use crate::consensus_handler::{
@@ -824,6 +824,301 @@ impl AuthorityPerEpochStore {
         });
         s.update_buffer_stake_metric();
         s
+    }
+
+    /// Creates an AuthorityPerEpochStore for rollback to a specific epoch.
+    /// This function opens existing tables, cleans pending states, then creates the epoch store.
+    /// 
+    /// It performs two types of cleanup:
+    /// 1. Cross-epoch cleanup: Removes ALL per-epoch databases for epochs > target_epoch
+    /// 2. Single-epoch cleanup: For the target epoch, removes pending states above the highest checkpoint
+    #[instrument(name = "AuthorityPerEpochStore::rollback_to_epoch", level = "error", skip_all, fields(target_epoch = target_epoch))]
+    pub fn rollback_to_epoch(
+        name: AuthorityName,
+        committee: Arc<Committee>,
+        parent_path: &Path,
+        db_options: Option<Options>,
+        metrics: Arc<EpochMetrics>,
+        epoch_start_configuration: EpochStartConfiguration,
+        execution_cache: Arc<ExecutionCache>,
+        cache_metrics: Arc<ResolverMetrics>,
+        signature_verifier_metrics: Arc<SignatureVerifierMetrics>,
+        expensive_safety_check_config: &ExpensiveSafetyCheckConfig,
+        chain_identifier: ChainIdentifier,
+        target_epoch: EpochId,
+        checkpoint_store: Arc<CheckpointStore>,
+    ) -> MgoResult<Arc<Self>> {
+        let current_time = Instant::now();
+        let epoch_id = committee.epoch;
+        
+        // Ensure we're rolling back to the correct epoch
+        if epoch_id != target_epoch {
+            return Err(MgoError::Rollback(format!(
+                "Committee epoch {} does not match target rollback epoch {}",
+                epoch_id, target_epoch
+            )));
+        }
+
+        info!("Starting rollback to epoch {} with pending state cleanup", target_epoch);
+
+        // Phase 1: Clean up per-epoch databases for epochs > target_epoch
+        Self::cleanup_future_epoch_databases(parent_path, target_epoch)?;
+
+        // Phase 2: Open tables for target epoch and clean pending states above checkpoint
+        let tables = AuthorityEpochTables::open(epoch_id, parent_path, db_options.clone());
+        
+        // Get the highest checkpoint in the target epoch
+        let highest_checkpoint = checkpoint_store
+            .get_epoch_last_checkpoint(target_epoch)?
+            .ok_or_else(|| MgoError::Rollback(format!(
+                "No checkpoints found for target epoch {}",
+                target_epoch
+            )))?;
+        
+        let checkpoint_seq = highest_checkpoint.sequence_number();
+        info!("Cleaning pending states above checkpoint {} in epoch {}", checkpoint_seq, target_epoch);
+
+        // Clean pending states in the target epoch
+        Self::cleanup_pending_states_above_checkpoint(&tables, *checkpoint_seq)?;
+
+        // Now proceed with normal initialization but with clean state
+        let end_of_publish =
+            StakeAggregator::from_iter(committee.clone(), tables.end_of_publish.unbounded_iter());
+        
+        // Reset reconfig state to default for rollback
+        let reconfig_state = ReconfigState::default();
+        tables.reconfig_state.insert(&RECONFIG_STATE_INDEX, &reconfig_state)?;
+
+        let epoch_alive_notify = NotifyOnce::new();
+        
+        // After cleanup, there should be no pending consensus transactions
+        let pending_consensus_transactions = tables.get_all_pending_consensus_transactions();
+        if !pending_consensus_transactions.is_empty() {
+            warn!("Found {} pending consensus transactions after cleanup", 
+                  pending_consensus_transactions.len());
+        }
+        
+        let pending_consensus_certificates: HashSet<_> = HashSet::new();
+        
+        assert_eq!(
+            epoch_start_configuration.epoch_start_state().epoch(),
+            epoch_id
+        );
+        
+        let epoch_start_configuration = Arc::new(epoch_start_configuration);
+        metrics.current_epoch.set(epoch_id as i64);
+        metrics
+            .current_voting_right
+            .set(committee.weight(&name) as i64);
+        let protocol_version = epoch_start_configuration
+            .epoch_start_state()
+            .protocol_version();
+        let protocol_config =
+            ProtocolConfig::get_for_version(protocol_version, chain_identifier.chain());
+
+        let execution_component = ExecutionComponents::new(
+            &protocol_config,
+            execution_cache.clone(),
+            cache_metrics,
+            expensive_safety_check_config,
+        );
+
+
+        let zklogin_env = match chain_identifier.chain() {
+            // Testnet and mainnet are treated the same since it is permanent.
+            Chain::Mainnet | Chain::Testnet => ZkLoginEnv::Prod,
+            _ => ZkLoginEnv::Test,
+        };
+
+        let supported_providers = protocol_config
+            .zklogin_supported_providers()
+            .iter()
+            .map(|s| OIDCProvider::from_str(s).expect("Invalid provider string"))
+            .collect::<Vec<_>>();
+
+        let signature_verifier = SignatureVerifier::new(
+            committee.clone(),
+            signature_verifier_metrics,
+            supported_providers,
+            zklogin_env,
+            protocol_config.verify_legacy_zklogin_address(),
+            protocol_config.accept_zklogin_in_multisig(),
+        );
+
+        let authenticator_state_exists = epoch_start_configuration
+            .authenticator_obj_initial_shared_version()
+            .is_some();
+        let authenticator_state_enabled =
+            authenticator_state_exists && protocol_config.enable_jwk_consensus_updates();
+
+        if authenticator_state_enabled {
+            info!("authenticator_state enabled");
+            let authenticator_state = get_authenticator_state(execution_cache.as_ref())
+                .expect("Read cannot fail")
+                .expect("Authenticator state must exist");
+
+            for active_jwk in &authenticator_state.active_jwks {
+                let ActiveJwk { jwk_id, jwk, epoch } = active_jwk;
+                assert!(epoch <= &epoch_id);
+                signature_verifier.insert_jwk(jwk_id, jwk);
+            }
+        } else {
+            info!("authenticator_state disabled");
+        }
+
+        let is_validator = committee.authority_index(&name).is_some();
+        if is_validator {
+            assert!(epoch_start_configuration
+                .flags()
+                .contains(&EpochFlag::InMemoryCheckpointRoots));
+        }
+
+        let mut jwk_aggregator = JwkAggregator::new(committee.clone());
+
+        for ((authority, id, jwk), _) in tables.pending_jwks.unbounded_iter().seek_to_first() {
+            jwk_aggregator.insert(authority, (id, jwk));
+        }
+
+        let jwk_aggregator = Mutex::new(jwk_aggregator);
+
+        let s = Arc::new(AuthorityPerEpochStore {
+            name,
+            committee,
+            protocol_config,
+            tables: ArcSwapOption::new(Some(Arc::new(tables))),
+            parent_path: parent_path.to_path_buf(),
+            db_options,
+            reconfig_state_mem: RwLock::new(reconfig_state),
+            epoch_alive_notify,
+            user_certs_closed_notify: NotifyOnce::new(),
+            epoch_alive: tokio::sync::RwLock::new(true),
+            consensus_notify_read: NotifyRead::new(),
+            signature_verifier,
+            checkpoint_state_notify_read: NotifyRead::new(),
+            end_of_publish: Mutex::new(end_of_publish),
+            pending_consensus_certificates: Mutex::new(pending_consensus_certificates),
+            mutex_table: MutexTable::new(MUTEX_TABLE_SIZE),
+            epoch_open_time: current_time,
+            epoch_close_time: Default::default(),
+            metrics,
+            epoch_start_configuration,
+            execution_component,
+            chain_identifier,
+            jwk_aggregator,
+            randomness_manager: OnceCell::new(),
+        });
+        
+        s.update_buffer_stake_metric();
+        
+        info!("Successfully created AuthorityPerEpochStore for rollback to epoch {}", target_epoch);
+        Ok(s)
+    }
+
+    /// Cleans up all per-epoch databases for epochs > target_epoch using RocksDB destroy
+    fn cleanup_future_epoch_databases(parent_path: &Path, target_epoch: EpochId) -> MgoResult<()> {
+        use typed_store::rocks::safe_drop_db;
+        
+        info!("Cleaning up per-epoch databases for epochs > {}", target_epoch);
+        
+        // Scan for epoch databases that need to be removed
+        // Each epoch database is stored at: parent_path/epoch_X
+        let mut epochs_to_remove = Vec::new();
+        
+        // First, find all epochs > target_epoch by checking if their paths exist
+        // We'll check a reasonable range of epochs after target_epoch
+        for epoch in (target_epoch + 1)..(target_epoch + 1000) {
+            let epoch_path = AuthorityEpochTables::path(epoch, parent_path);
+            if epoch_path.exists() {
+                epochs_to_remove.push((epoch, epoch_path));
+            } else {
+                // Assume epochs are contiguous, so stop when we find a gap
+                break;
+            }
+        }
+        
+        // Now destroy each epoch database
+        for (epoch, path) in epochs_to_remove {
+            info!("Destroying RocksDB for epoch {} at path {:?}", epoch, path);
+            match safe_drop_db(path) {
+                Ok(()) => info!("Successfully destroyed database for epoch {}", epoch),
+                Err(e) => {
+                    error!("Failed to destroy database for epoch {}: {}", epoch, e);
+                    return Err(MgoError::Rollback(format!(
+                        "Failed to destroy epoch {} database: {}",
+                        epoch, e
+                    )));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Cleans pending states in the current epoch that are above the given checkpoint
+    fn cleanup_pending_states_above_checkpoint(
+        tables: &AuthorityEpochTables,
+        checkpoint_seq: CheckpointSequenceNumber,
+    ) -> MgoResult<()> {
+        // Clean pending_execution table
+        let mut pending_to_remove = Vec::new();
+        for result in tables.pending_execution.unbounded_iter() {
+            let (digest, _) = result;
+            // Remove all pending executions as they should be re-submitted if needed
+            pending_to_remove.push(digest);
+        }
+        
+        if !pending_to_remove.is_empty() {
+            info!("Removing {} pending executions", pending_to_remove.len());
+            for digest in pending_to_remove {
+                tables.pending_execution.remove(&digest)?;
+            }
+        }
+
+        // Clean pending_consensus_transactions table
+        let mut consensus_to_remove = Vec::new();
+        for result in tables.pending_consensus_transactions.unbounded_iter() {
+            let (key, _) = result;
+            // Remove all pending consensus transactions as they should be re-submitted if valid
+            consensus_to_remove.push(key);
+        }
+        
+        if !consensus_to_remove.is_empty() {
+            info!("Removing {} pending consensus transactions", consensus_to_remove.len());
+            for key in consensus_to_remove {
+                tables.pending_consensus_transactions.remove(&key)?;
+            }
+        }
+
+        // Clean pending_checkpoints table
+        // Remove all pending checkpoints with height > checkpoint sequence
+        let mut checkpoints_to_remove = Vec::new();
+        for result in tables.pending_checkpoints.unbounded_iter() {
+            let (height, _) = result;
+            // Since checkpoint height generally corresponds to sequence number,
+            // remove those above our target checkpoint
+            if height as u64 > checkpoint_seq {
+                checkpoints_to_remove.push(height);
+            }
+        }
+        
+        if !checkpoints_to_remove.is_empty() {
+            info!("Removing {} pending checkpoints above sequence {}", 
+                  checkpoints_to_remove.len(), checkpoint_seq);
+            for height in checkpoints_to_remove {
+                tables.pending_checkpoints.remove(&height)?;
+            }
+        }
+
+        // Reset consensus processing state
+        // Clear consensus_message_processed for safety
+        tables.consensus_message_processed.unsafe_clear()?;
+        
+        // Reset last consensus index to ensure proper restart
+        tables.last_consensus_index.remove(&LAST_CONSENSUS_STATS_ADDR)?;
+        tables.last_consensus_stats.remove(&LAST_CONSENSUS_STATS_ADDR)?;
+
+        info!("Completed cleanup of pending states above checkpoint {}", checkpoint_seq);
+        Ok(())
     }
 
     pub fn tables(&self) -> MgoResult<Arc<AuthorityEpochTables>> {

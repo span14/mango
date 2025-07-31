@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use serde::{Deserialize, Serialize};
 #[cfg(msim)]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -106,7 +107,8 @@ use mgo_storage::{
     key_value_store_metrics::KeyValueStoreMetrics,
 };
 use mgo_storage::{FileCompression, IndexStore, StorageFormat};
-use mgo_types::base_types::{AuthorityName, EpochId};
+use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress};
+use mgo_types::multiaddr::Multiaddr;
 use mgo_types::committee::Committee;
 use mgo_types::crypto::KeypairTraits;
 use mgo_types::error::{MgoError, MgoResult};
@@ -125,6 +127,20 @@ use crate::metrics::{GrpcMetrics, MgoNodeMetrics};
 pub mod admin;
 mod handle;
 pub mod metrics;
+
+/// Network address overrides for rollback operations
+/// Allows updating validator network addresses during epoch rollback
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkAddressOverride {
+    /// Main MGO validator service address
+    pub mgo_net_address: Option<Multiaddr>,
+    /// P2P discovery and gossip address  
+    pub p2p_address: Option<Multiaddr>,
+    /// Narwhal consensus primary address
+    pub narwhal_primary_address: Option<Multiaddr>,
+    /// Narwhal consensus worker address
+    pub narwhal_worker_address: Option<Multiaddr>,
+}
 
 pub struct ValidatorComponents {
     validator_server_handle: JoinHandle<Result<()>>,
@@ -736,6 +752,326 @@ impl MgoNode {
         spawn_monitored_task!(async move { Self::monitor_reconfiguration(node_copy).await });
 
         Ok(node)
+    }
+
+    pub async fn rollback_by_epoch_async(
+        config: &NodeConfig,
+        registry_service: RegistryService,
+        custom_rpc_runtime: Option<Handle>,
+        epoch_id: EpochId,
+        network_address_overrides: Option<HashMap<MgoAddress, NetworkAddressOverride>>,
+    ) -> Result<Arc<MgoNode>> {
+        NodeConfigMetrics::new(&registry_service.default_registry()).record_metrics(config);
+        let mut config = config.clone();
+        if config.supported_protocol_versions.is_none() {
+            info!(
+                "populating config.supported_protocol_versions with default {:?}",
+                SupportedProtocolVersions::SYSTEM_DEFAULT
+            );
+            config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
+        }
+        let run_with_range = config.run_with_range;
+        let is_validator = config.consensus_config().is_some();
+        let is_full_node = !is_validator;
+        let prometheus_registry = registry_service.default_registry();
+        info!(node =? config.protocol_public_key(),
+            "Initializing mgo-node listening on {}", config.network_address
+        );
+        DBMetrics::init(&prometheus_registry);
+        mango_metrics::init_metrics(&prometheus_registry);
+
+        let secret = Arc::pin(config.protocol_key_pair().copy());
+        let committee_store = Arc::new(CommitteeStore::restore_committee(
+            config.db_path().join("epochs"), 
+            epoch_id, 
+            None
+        )?);
+        
+        let perpetual_options = default_db_options().optimize_db_for_write_throughput(4);
+        let perpetual_tables = Arc::new(AuthorityPerpetualTables::open(
+            &config.db_path().join("store"),
+            Some(perpetual_options.options),
+        ));
+        
+        perpetual_tables.rollback_to_epoch(epoch_id)?;
+        
+        let genesis = config.genesis()?;
+        let store = AuthorityStore::open(
+            perpetual_tables,
+            genesis,
+            config.indirect_objects_threshold,
+            config
+                .expensive_safety_check_config
+                .enable_epoch_mgo_conservation_check(),
+            &prometheus_registry,
+        )
+        .await?;
+
+        let execution_cache = Arc::new(ExecutionCache::new(store.clone(), &prometheus_registry));
+        let cur_epoch = store.get_recovery_epoch_at_restart()?;
+        let committee = committee_store
+            .get_committee(&cur_epoch)?
+            .expect("Committee of the current epoch must exist");
+        let epoch_start_configuration = store
+            .get_epoch_start_configuration()?
+            .expect("EpochStartConfiguration of the current epoch must exist");
+        let cache_metrics = Arc::new(ResolverMetrics::new(&prometheus_registry));
+        let signature_verifier_metrics = SignatureVerifierMetrics::new(&prometheus_registry);
+
+        let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
+        checkpoint_store.rollback_to_epoch(epoch_id)?;
+
+        let epoch_options = default_db_options().optimize_db_for_write_throughput(4);
+        let epoch_store = AuthorityPerEpochStore::rollback_to_epoch(
+            config.protocol_public_key(),
+            committee.clone(),
+            &config.db_path().join("store"),
+            Some(epoch_options.options),
+            EpochMetrics::new(&registry_service.default_registry()),
+            epoch_start_configuration,
+            execution_cache.clone(),
+            cache_metrics,
+            signature_verifier_metrics,
+            &config.expensive_safety_check_config,
+            ChainIdentifier::from(*genesis.checkpoint().digest()),
+            epoch_id,
+            checkpoint_store.clone(),
+        )?;
+        replay_log!(
+            "Beginning replay run. Epoch: {:?}, Protocol config: {:?}",
+            epoch_store.epoch(),
+            epoch_store.protocol_config()
+        );
+        let effective_buffer_stake = epoch_store.get_effective_buffer_stake_bps();
+        let default_buffer_stake = epoch_store
+            .protocol_config()
+            .buffer_stake_for_protocol_upgrade_bps();
+        if effective_buffer_stake != default_buffer_stake {
+            warn!(
+                ?effective_buffer_stake,
+                ?default_buffer_stake,
+                "buffer_stake_for_protocol_upgrade_bps is currently overridden"
+            );
+        }
+        let state_sync_store = RocksDbStore::restore_state(
+            store.clone(),
+            execution_cache.clone(),
+            committee_store.clone(),
+            checkpoint_store.clone(),
+        )?;
+
+        let index_store = if is_full_node && config.enable_index_processing {
+            Some(Arc::new(IndexStore::new(
+                config.db_path().join("indexes"),
+                &prometheus_registry,
+                epoch_store
+                    .protocol_config()
+                    .max_move_identifier_len_as_option(),
+            )))
+        } else {
+            None
+        };
+        let chain_identifier = ChainIdentifier::from(*genesis.checkpoint().digest());
+        // It's ok if the value is already set due to data races.
+        let _ = CHAIN_IDENTIFIER.set(chain_identifier);
+
+        let archive_readers =
+            ArchiveReaderBalancer::new(config.archive_reader_config(), &prometheus_registry)?;
+        let (trusted_peer_change_tx, trusted_peer_change_rx) = watch::channel(Default::default());
+        let (p2p_network, discovery_handle, state_sync_handle) = Self::create_p2p_network(
+            &config,
+            state_sync_store.clone(),
+            chain_identifier,
+            trusted_peer_change_rx,
+            archive_readers.clone(),
+            &prometheus_registry,
+        )?;
+
+        // We must explicitly send this instead of relying on the initial value to trigger
+        // watch value change, so that state-sync is able to process it.
+        
+        // Apply network address overrides if provided during rollback
+        let epoch_start_state = if let Some(ref overrides) = network_address_overrides {
+            info!("Applying network address overrides for {} validators", overrides.len());
+            apply_network_address_overrides(epoch_store.epoch_start_state(), overrides)?
+        } else {
+            epoch_store.epoch_start_state().clone()
+        };
+        
+        send_trusted_peer_change(
+            &config,
+            &trusted_peer_change_tx,
+            &epoch_start_state,
+        )
+        .expect("Initial trusted peers must be set");
+        
+        // Start archiving local state to remote store
+        let state_archive_handle =
+            Self::start_state_archival(&config, &prometheus_registry, state_sync_store.clone())
+                .await?;
+        // Start uploading state snapshot to remote store
+        let state_snapshot_handle = Self::start_state_snapshot(&config, &prometheus_registry)?;
+        // Start uploading db checkpoints to remote store
+        let (db_checkpoint_config, db_checkpoint_handle) = Self::start_db_checkpoint(
+            &config,
+            &prometheus_registry,
+            state_snapshot_handle.is_some(),
+        )?;
+
+        let mut pruning_config = config.authority_store_pruning_config;
+        if !epoch_store
+            .protocol_config()
+            .simplified_unwrap_then_delete()
+        {
+            // We cannot prune tombstones if simplified_unwrap_then_delete is not enabled.
+            pruning_config.set_killswitch_tombstone_pruning(true);
+        }
+
+        let state = AuthorityState::new(
+            config.protocol_public_key(),
+            secret,
+            config.supported_protocol_versions.unwrap(),
+            store.clone(),
+            execution_cache,
+            epoch_store.clone(),
+            committee_store.clone(),
+            index_store.clone(),
+            checkpoint_store.clone(),
+            &prometheus_registry,
+            pruning_config,
+            genesis.objects(),
+            &db_checkpoint_config,
+            config.expensive_safety_check_config.clone(),
+            config.transaction_deny_config.clone(),
+            config.certificate_deny_config.clone(),
+            config.indirect_objects_threshold,
+            config.state_debug_dump_config.clone(),
+            config.overload_threshold_config.clone(),
+            archive_readers,
+        )
+        .await;
+
+        if config
+            .expensive_safety_check_config
+            .enable_secondary_index_checks()
+        {
+            if let Some(indexes) = state.indexes.clone() {
+                mgo_core::verify_indexes::verify_indexes(state.database.clone(), indexes)
+                    .expect("secondary indexes are inconsistent");
+            }
+        }
+
+        let (end_of_epoch_channel, end_of_epoch_receiver) =
+            broadcast::channel(config.end_of_epoch_broadcast_channel_capacity);
+
+        let transaction_orchestrator = if is_full_node && run_with_range.is_none() {
+            Some(Arc::new(
+                TransactiondOrchestrator::new_with_network_clients(
+                    state.clone(),
+                    end_of_epoch_receiver,
+                    &config.db_path(),
+                    &prometheus_registry,
+                )?,
+            ))
+        } else {
+            None
+        };
+
+        let http_server = build_http_server(
+            state.clone(),
+            state_sync_store,
+            &transaction_orchestrator.clone(),
+            &config,
+            &prometheus_registry,
+            custom_rpc_runtime,
+        )?;
+
+        let accumulator = Arc::new(StateAccumulator::new(store));
+
+        let authority_names_to_peer_ids = epoch_store
+            .epoch_start_state()
+            .get_authority_names_to_peer_ids();
+
+        let network_connection_metrics =
+            NetworkConnectionMetrics::new("mgo", &registry_service.default_registry());
+
+        let authority_names_to_peer_ids = ArcSwap::from_pointee(authority_names_to_peer_ids);
+
+        let (_connection_monitor_handle, connection_statuses) =
+            narwhal_network::connectivity::ConnectionMonitor::spawn(
+                p2p_network.downgrade(),
+                network_connection_metrics,
+                HashMap::new(),
+                None,
+            );
+
+        let connection_monitor_status = ConnectionMonitorStatus {
+            connection_statuses,
+            authority_names_to_peer_ids,
+        };
+
+        let connection_monitor_status = Arc::new(connection_monitor_status);
+        let mgo_node_metrics = Arc::new(MgoNodeMetrics::new(&registry_service.default_registry()));
+
+        let validator_components = if state.is_validator(&epoch_store) {
+            let components = Self::construct_validator_components(
+                &config,
+                state.clone(),
+                committee,
+                epoch_store.clone(),
+                checkpoint_store.clone(),
+                state_sync_handle.clone(),
+                accumulator.clone(),
+                connection_monitor_status.clone(),
+                &registry_service,
+                mgo_node_metrics.clone(),
+            )
+            .await?;
+            // This is only needed during cold start.
+            components.consensus_adapter.submit_recovered(&epoch_store);
+
+            Some(components)
+        } else {
+            None
+        };
+
+        // setup shutdown channel
+        let (shutdown_channel, _) = broadcast::channel::<Option<RunWithRange>>(1);
+
+        let node = Self {
+            config,
+            validator_components: Mutex::new(validator_components),
+            _http_server: http_server,
+            state,
+            transaction_orchestrator,
+            registry_service,
+            metrics: mgo_node_metrics,
+
+            _discovery: discovery_handle,
+            state_sync: state_sync_handle,
+            checkpoint_store,
+            accumulator,
+            end_of_epoch_channel,
+            connection_monitor_status,
+            trusted_peer_change_tx,
+
+            _db_checkpoint_handle: db_checkpoint_handle,
+
+            #[cfg(msim)]
+            sim_state: Default::default(),
+
+            _state_archive_handle: state_archive_handle,
+            _state_snapshot_uploader_handle: state_snapshot_handle,
+            shutdown_channel_tx: shutdown_channel,
+        };
+
+        info!("MgoNode rollbacked and restarted!");
+        let node = Arc::new(node);
+        let node_copy = node.clone();
+        spawn_monitored_task!(async move { Self::monitor_reconfiguration(node_copy).await });
+
+        Ok(node)
+
     }
 
     pub fn subscribe_to_epoch_change(&self) -> broadcast::Receiver<MgoSystemState> {
@@ -1670,6 +2006,47 @@ impl MgoNode {
         get_jwk_injector()(authority, provider)
     }
 }
+
+/// Apply network address overrides to epoch start system state
+/// This allows updating validator network addresses during rollback operations
+pub fn apply_network_address_overrides(
+    original_state: &EpochStartSystemState,
+    overrides: &HashMap<MgoAddress, NetworkAddressOverride>,
+) -> Result<EpochStartSystemState> {
+    
+    let mut modified_state = original_state.clone();
+    
+    // Get mutable access to validator infos
+    if let validator_infos = modified_state.get_validators_mut() {
+        for validator_info in validator_infos {
+            let validator_address = validator_info.mgo_address;
+            
+            if let Some(override_info) = overrides.get(&validator_address) {
+                info!(
+                    "Applying network overrides for validator {}: updating addresses",
+                    validator_address
+                );
+                
+                // Apply overrides for each address type if provided
+                if let Some(ref new_address) = override_info.mgo_net_address {
+                    validator_info.mgo_net_address = new_address.clone();
+                }
+                if let Some(ref new_address) = override_info.p2p_address {
+                    validator_info.p2p_address = new_address.clone();
+                }
+                if let Some(ref new_address) = override_info.narwhal_primary_address {
+                    validator_info.narwhal_primary_address = new_address.clone();
+                }
+                if let Some(ref new_address) = override_info.narwhal_worker_address {
+                    validator_info.narwhal_worker_address = new_address.clone();
+                }
+            }
+        }
+    }
+    
+    Ok(modified_state)
+}
+
 
 /// Notify state-sync that a new list of trusted peers are now available.
 fn send_trusted_peer_change(

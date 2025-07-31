@@ -612,6 +612,9 @@ pub enum MgoError {
 
     #[error("Storage error: {0}")]
     Storage(String),
+
+    #[error("Rollback error: {0}")]
+    Rollback(String),
 }
 
 #[repr(u64)]

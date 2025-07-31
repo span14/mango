@@ -1,6 +1,7 @@
 // Copyright (c) MangoNet Labs Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+use mgo_types::error::MgoResult;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use mgo_types::storage::ObjectStore;
@@ -56,6 +57,34 @@ impl RocksDbStore {
             highest_verified_checkpoint: Arc::new(Mutex::new(None)),
             highest_synced_checkpoint: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn restore_state(
+        authority_store: Arc<AuthorityStore>,
+        execution_cache: Arc<dyn ExecutionCacheRead>,
+        committee_store: Arc<CommitteeStore>,
+        checkpoint_store: Arc<CheckpointStore>,
+    ) -> MgoResult<Self> {
+        let highest_verified_checkpoint = checkpoint_store
+            .get_highest_verified_checkpoint()?.ok_or_else( ||
+                MgoError::Rollback (
+                    "storage should have a verified checkpoint".to_string(),
+                )
+            )?;
+        let highest_synced_checkpoint = checkpoint_store
+            .get_highest_synced_checkpoint()?.ok_or_else( || 
+                MgoError::Rollback (
+                    "storage should have a synced checkpoint".to_string(),
+                )
+            )?;
+        Ok(Self {
+            authority_store,
+            execution_cache,
+            committee_store,
+            checkpoint_store,
+            highest_verified_checkpoint: Arc::new(Mutex::new(Some(highest_verified_checkpoint.sequence_number))),
+            highest_synced_checkpoint: Arc::new(Mutex::new(Some(highest_synced_checkpoint.sequence_number))),
+        })
     }
 
     pub fn get_objects(&self, object_keys: &[ObjectKey]) -> Result<Vec<Option<Object>>, MgoError> {
