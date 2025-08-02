@@ -19,6 +19,10 @@ use mgo_telemetry::send_telemetry_event;
 use mgo_types::committee::EpochId;
 use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 use mgo_types::multiaddr::Multiaddr;
+use mgo_types::base_types::MgoAddress;
+use mgo_node::NetworkAddressOverride;
+use std::collections::HashMap;
+use std::fs;
 
 const GIT_REVISION: &str = {
     if let Some(revision) = option_env!("GIT_REVISION") {
@@ -54,6 +58,12 @@ struct Args {
 
     #[clap(long, group = "exclusive")]
     run_with_range_checkpoint: Option<CheckpointSequenceNumber>,
+
+    #[clap(long, help = "Rollback node to specified epoch")]
+    rollback_epoch: Option<EpochId>,
+
+    #[clap(long, help = "Path to JSON file containing network address mapping overrides for rollback")]
+    rollback_network_mapping: Option<PathBuf>,
 }
 
 fn main() {
@@ -131,12 +141,55 @@ fn main() {
     // let mgo-node signal main to shutdown runtimes
     let (runtime_shutdown_tx, runtime_shutdown_rx) = broadcast::channel::<()>(1);
 
+    // Capture rollback arguments
+    let rollback_epoch = args.rollback_epoch;
+    let rollback_network_mapping = args.rollback_network_mapping;
+
     runtimes.mgo_node.spawn(async move {
-        match mgo_node::MgoNode::start_async(&config, registry_service, Some(rpc_runtime)).await {
+        // Check if rollback is requested
+        let mgo_node_result = if let Some(rollback_epoch) = rollback_epoch {
+            info!("Starting node with rollback to epoch {}", rollback_epoch);
+            
+            // Parse network address overrides if provided
+            let network_address_overrides = if let Some(mapping_path) = rollback_network_mapping {
+                match fs::read_to_string(&mapping_path) {
+                    Ok(mapping_content) => {
+                        match serde_json::from_str::<HashMap<MgoAddress, NetworkAddressOverride>>(&mapping_content) {
+                            Ok(overrides) => {
+                                info!("Loaded network address overrides for {} validators", overrides.len());
+                                Some(overrides)
+                            }
+                            Err(e) => {
+                                error!("Failed to parse network mapping JSON from {:?}: {}", mapping_path, e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read network mapping file {:?}: {}", mapping_path, e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+            
+            mgo_node::MgoNode::rollback_by_epoch_async(
+                &config,
+                registry_service,
+                Some(rpc_runtime),
+                rollback_epoch,
+                network_address_overrides,
+            ).await
+        } else {
+            mgo_node::MgoNode::start_async(&config, registry_service, Some(rpc_runtime)).await
+        };
+
+        match mgo_node_result {
             Ok(mgo_node) => node_once_cell_clone
                 .set(mgo_node)
                 .expect("Failed to set node in AsyncOnceCell"),
-
+            
             Err(e) => {
                 error!("Failed to start node: {e:?}");
                 std::process::exit(1);
