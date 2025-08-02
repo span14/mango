@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::authority::authority_store::LockDetailsWrapper;
+use crate::authority::epoch_start_configuration::EpochStartConfiguration;
+use crate::checkpoints::CheckpointStore;
 use mgo_types::accumulator::Accumulator;
 use mgo_types::base_types::SequenceNumber;
 use mgo_types::digests::TransactionEventsDigest;
@@ -22,7 +24,8 @@ use crate::authority::authority_store_types::{
     get_store_object_pair, try_construct_object, ObjectContentDigest, StoreData,
     StoreMoveObjectWrapper, StoreObject, StoreObjectPair, StoreObjectValue, StoreObjectWrapper,
 };
-use crate::authority::epoch_start_configuration::EpochStartConfiguration;
+use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemState;
+use tracing::warn;
 use tracing::{debug, info};
 use typed_store_derive::DBMapUtils;
 
@@ -507,7 +510,11 @@ impl AuthorityPerpetualTables {
     ///
     /// WARNING: This operation is irreversible and should only be used in
     /// disaster recovery scenarios. Ensure proper backups exist before calling.
-    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<()> {
+    pub fn rollback_to_epoch(
+        &self, 
+        target_epoch: EpochId,
+        checkpoint_store: &CheckpointStore,
+    ) -> MgoResult<()> {
         info!("Starting rollback to epoch {} for perpetual table", target_epoch);
 
         // Validate rollback parameters
@@ -531,6 +538,9 @@ impl AuthorityPerpetualTables {
         // Phase 5: Clean up locks and markers
         self.clean_up_locks_and_markers(&mut batch, &transactions_to_remove)?;
 
+        // Phase 6: Update singleton tables to target epoch state
+        self.rollback_singleton_tables(&mut batch, target_epoch, checkpoint_store)?;
+
         // Execute all operations atomically
         info!("Executing rollback batch write for epoch {}", target_epoch);
         batch.write()?;
@@ -551,7 +561,7 @@ impl AuthorityPerpetualTables {
         let mut epochs_to_remove = 0;
         for result in self.root_state_hash_by_epoch.unbounded_iter() {
             let (epoch_id, _) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 epochs_to_remove += 1;
             }
         }
@@ -559,7 +569,7 @@ impl AuthorityPerpetualTables {
         let mut markers_to_remove = 0;
         for result in self.object_per_epoch_marker_table.unbounded_iter() {
             let ((epoch_id, _), _) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 markers_to_remove += 1;
             }
         }
@@ -616,13 +626,13 @@ impl AuthorityPerpetualTables {
     }
 
     fn remove_epoch_keyed_data(&self, batch: &mut DBBatch, target_epoch: EpochId) -> MgoResult<()> {
-        debug!("Removing epoch-keyed data for epochs > {}", target_epoch);
+        debug!("Removing epoch-keyed data for epochs >= {}", target_epoch);
 
-        // Remove root state hashes for epochs > target_epoch
+        // Remove root state hashes for epochs >= target_epoch
         let mut epochs_to_remove = Vec::new();
         for result in self.root_state_hash_by_epoch.unbounded_iter() {
             let (epoch_id, _) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 epochs_to_remove.push(epoch_id);
             }
         }
@@ -636,11 +646,11 @@ impl AuthorityPerpetualTables {
             batch.delete_batch(&self.root_state_hash_by_epoch, epochs_to_remove.iter())?;
         }
 
-        // Remove object markers for epochs > target_epoch
+        // Remove object markers for epochs >= target_epoch
         let mut markers_to_remove = Vec::new();
         for result in self.object_per_epoch_marker_table.unbounded_iter() {
             let ((epoch_id, object_key), _) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 markers_to_remove.push((epoch_id, object_key));
             }
         }
@@ -660,14 +670,14 @@ impl AuthorityPerpetualTables {
         &self,
         target_epoch: EpochId,
     ) -> MgoResult<Vec<TransactionDigest>> {
-        debug!("Identifying transactions from epochs > {}", target_epoch);
+        debug!("Identifying transactions from epochs >= {}", target_epoch);
 
         let mut transactions_to_remove = Vec::new();
 
         // Method 1: Use the deprecated executed_transactions_to_checkpoint table if available
         for result in self.executed_transactions_to_checkpoint.unbounded_iter() {
             let (tx_digest, (epoch_id, _checkpoint_seq)) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 transactions_to_remove.push(tx_digest);
             }
         }
@@ -676,7 +686,7 @@ impl AuthorityPerpetualTables {
         // This handles cases where the deprecated table might be incomplete
         for result in self.effects.unbounded_iter() {
             let (effects_digest, effects) = result;
-            if effects.executed_epoch() > target_epoch {
+            if effects.executed_epoch() >= target_epoch {
                 // Find the transaction digest for this effects
                 for executed_result in self.executed_effects.unbounded_iter() {
                     let (tx_digest, stored_effects_digest) = executed_result;
@@ -773,7 +783,7 @@ impl AuthorityPerpetualTables {
         transactions_to_remove: &[TransactionDigest],
     ) -> MgoResult<()> {
         debug!(
-            "Removing objects modified by {} transactions from epochs > {}",
+            "Removing objects modified by {} transactions from epochs >= {}",
             transactions_to_remove.len(),
             target_epoch
         );
@@ -882,6 +892,200 @@ impl AuthorityPerpetualTables {
         }
 
         Ok(())
+    }
+
+    fn rollback_singleton_tables(
+        &self,
+        batch: &mut DBBatch,
+        target_epoch: EpochId,
+        checkpoint_store: &CheckpointStore,
+    ) -> MgoResult<()> {
+        info!("Updating singleton tables for rollback to epoch {}", target_epoch);
+
+        // 1. Keep epoch_start_configuration at epoch N
+        // According to the rollback requirements, we should KEEP the epoch_start_configuration
+        // at the target epoch, not rollback to a previous epoch. This ensures the system is
+        // configured for epoch N but with no execution data from epoch N.
+        if let Some(current_config) = self.epoch_start_configuration.get(&())? {
+            let current_epoch = current_config.epoch_start_state().epoch();
+            if current_epoch == target_epoch {
+                info!("Keeping epoch_start_configuration at target epoch {} as required", target_epoch);
+            } else if current_epoch > target_epoch {
+                // We need to recreate configuration for the target epoch
+                let updated_config = self.create_rollback_epoch_configuration(
+                    &current_config, 
+                    target_epoch,
+                    checkpoint_store
+                )?;
+                
+                batch.insert_batch(&self.epoch_start_configuration, [((), updated_config)])?;
+                info!("Updated epoch_start_configuration to target epoch {}", target_epoch);
+            } else {
+                info!("Current epoch_start_configuration at epoch {} is before target epoch {}", 
+                      current_epoch, target_epoch);
+            }
+        }
+
+        // 2. Rollback pruned_checkpoint
+        // We need to find the highest checkpoint sequence number that exists
+        // after rollback. This requires checking what checkpoints will remain.
+        // First, let's check if we have a current pruned checkpoint
+        let current_pruned = self.pruned_checkpoint.get(&())?.unwrap_or(0);
+        
+        // We need to be conservative here. If we're rolling back epochs,
+        // we should reset the pruned checkpoint to ensure we don't reference
+        // checkpoints that no longer exist.
+        // A proper implementation would scan remaining checkpoints to find the highest valid one.
+        if current_pruned > 0 {
+            // For safety, reset to 0 when rolling back
+            // A production implementation should scan checkpoint data to find the actual highest
+            batch.insert_batch(&self.pruned_checkpoint, [((), 0u64)])?;
+            info!("Reset pruned_checkpoint from {} to 0 for safety during rollback", current_pruned);
+        }
+
+        // 3. Rollback expected_network_mgo_amount
+        // This value represents the total MGO in the network and should remain constant
+        // across epochs in normal operation. We log it but don't change it unless
+        // we have evidence of corruption.
+        if let Some(expected_amount) = self.expected_network_mgo_amount.get(&())? {
+            info!("Current expected_network_mgo_amount: {} (unchanged)", expected_amount);
+        }
+
+        // 4. Rollback expected_storage_fund_imbalance  
+        // This tracks the accumulated imbalance between storage fund balance and storage rebates.
+        // When rolling back, we're removing transactions that may have contributed to this imbalance.
+        // A complete implementation would need to:
+        // 1. Calculate storage rebates from all removed transactions
+        // 2. Adjust the imbalance accordingly
+        // For now, we log the current value for monitoring.
+        if let Some(imbalance) = self.expected_storage_fund_imbalance.get(&())? {
+            info!("Current expected_storage_fund_imbalance: {} (needs recalculation)", imbalance);
+            // TODO: Implement proper recalculation based on removed transactions
+            // This would involve summing storage_rebate from all TransactionEffects being removed
+        }
+
+        info!("Completed singleton tables rollback for epoch {}", target_epoch);
+        Ok(())
+    }
+
+    fn create_rollback_epoch_configuration(
+        &self,
+        current_config: &EpochStartConfiguration,
+        target_epoch: EpochId,
+        checkpoint_store: &CheckpointStore,
+    ) -> MgoResult<EpochStartConfiguration> {
+        
+        match current_config {
+            EpochStartConfiguration::V5(v5) => {
+                // Create a new system state with the target epoch
+                let updated_system_state = self.create_rollback_system_state(
+                    v5.epoch_start_state(), 
+                    target_epoch
+                )?;
+                
+                // Find the epoch digest for the target epoch
+                // This should be the digest of the last checkpoint of (target_epoch - 1)
+                let epoch_digest = self.get_epoch_digest_for_rollback(target_epoch, checkpoint_store)?;
+                let mut new_epoch_state_configuration = v5.clone();
+                new_epoch_state_configuration.set_system_state(updated_system_state);
+                new_epoch_state_configuration.set_epoch_digest(epoch_digest); 
+                // Keep the same flags and object versions for now
+                // In a more complete implementation, these might need adjustment too
+                Ok(EpochStartConfiguration::V5(new_epoch_state_configuration))
+            }
+            EpochStartConfiguration::V4(v4) => {
+                let updated_system_state = self.create_rollback_system_state(
+                    v4.epoch_start_state(), 
+                    target_epoch
+                )?;
+                let epoch_digest = self.get_epoch_digest_for_rollback(target_epoch, checkpoint_store)?;
+                let mut new_epoch_state_configuration = v4.clone();
+                new_epoch_state_configuration.set_system_state(updated_system_state);
+                new_epoch_state_configuration.set_epoch_digest(epoch_digest);
+
+                Ok(EpochStartConfiguration::V4(new_epoch_state_configuration))
+            }
+            EpochStartConfiguration::V3(v3) => {
+                let updated_system_state = self.create_rollback_system_state(
+                    v3.epoch_start_state(), 
+                    target_epoch
+                )?;
+                let epoch_digest = self.get_epoch_digest_for_rollback(target_epoch, checkpoint_store)?;
+                let mut new_epoch_state_configuration = v3.clone();
+                new_epoch_state_configuration.set_system_state(updated_system_state);
+                new_epoch_state_configuration.set_epoch_digest(epoch_digest);
+
+                Ok(EpochStartConfiguration::V3(new_epoch_state_configuration))
+            }
+            EpochStartConfiguration::V2(v2) => {
+                let updated_system_state = self.create_rollback_system_state(
+                    v2.epoch_start_state(), 
+                    target_epoch
+                )?;
+                let epoch_digest = self.get_epoch_digest_for_rollback(target_epoch, checkpoint_store)?;
+                let mut new_epoch_state_configuration = v2.clone();
+                new_epoch_state_configuration.set_system_state(updated_system_state);
+                new_epoch_state_configuration.set_epoch_digest(epoch_digest);
+
+                Ok(EpochStartConfiguration::V2(new_epoch_state_configuration))
+            }
+            EpochStartConfiguration::V1(v1) => {
+                let updated_system_state = self.create_rollback_system_state(
+                    v1.epoch_start_state(), 
+                    target_epoch
+                )?;
+                let epoch_digest = self.get_epoch_digest_for_rollback(target_epoch, checkpoint_store)?;
+                let mut new_epoch_state_configuration = v1.clone();
+                new_epoch_state_configuration.set_system_state(updated_system_state);
+                new_epoch_state_configuration.set_epoch_digest(epoch_digest);
+
+                Ok(EpochStartConfiguration::V1(new_epoch_state_configuration))
+            }
+        }
+    }
+
+    fn create_rollback_system_state(
+        &self,
+        current_system_state: &EpochStartSystemState,
+        target_epoch: EpochId,
+        
+    ) -> MgoResult<EpochStartSystemState> {
+        
+        match current_system_state {
+            EpochStartSystemState::V1(v1) => {
+                // Create a new system state with updated epoch
+                // We need to calculate appropriate timestamp for the target epoch
+                let target_timestamp = Utc::now().timestamp_millis() as u64;
+                let mut system_state = v1.clone();
+                system_state.set_epoch(target_epoch);
+                system_state.set_epoch_start_timestamp_ms(target_timestamp);
+                Ok(EpochStartSystemState::V1(system_state))
+            }
+        }
+    }
+
+    fn get_epoch_digest_for_rollback(
+        &self, 
+        target_epoch: EpochId,
+        checkpoint_store: &CheckpointStore,
+    ) -> MgoResult<CheckpointDigest> {
+        if target_epoch == 0 {
+            // Genesis epoch has digest 0
+            return Ok(CheckpointDigest::default());
+        }
+        
+        // For non-genesis epochs, we need the digest of the last checkpoint of the previous epoch
+        // Use the checkpoint store to get the actual checkpoint digest
+        let previous_epoch = target_epoch - 1;
+        
+        if let Some(last_checkpoint) = checkpoint_store.get_epoch_last_checkpoint(previous_epoch)? {
+            // Get the digest from the last checkpoint of the previous epoch
+            Ok(*last_checkpoint.digest())
+        } else {
+            // If we can't find the last checkpoint of the previous epoch, use default
+            warn!("Could not find last checkpoint for epoch {}, using default digest", previous_epoch);
+            Ok(CheckpointDigest::default())
+        }
     }
 }
 
@@ -1109,8 +1313,11 @@ mod tests {
         transaction::VerifiedTransaction,
     };
     use tempfile::TempDir;
+    use crate::checkpoints::CheckpointStore;
+    use std::sync::Arc;
 
-    fn create_test_authority_store() -> (AuthorityPerpetualTables, TempDir) {
+
+    fn create_test_authority_store() -> (AuthorityPerpetualTables, Arc<CheckpointStore>, TempDir) {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
         let perpetual_tables = AuthorityPerpetualTables::open_tables_read_write(
@@ -1119,7 +1326,13 @@ mod tests {
             None,
             None,
         );
-        (perpetual_tables, dir)
+        
+        // Create checkpoint store in a separate directory
+        let checkpoint_dir = dir.path().join("checkpoints");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        let checkpoint_store = CheckpointStore::new(&checkpoint_dir);
+        
+        (perpetual_tables, checkpoint_store, dir)
     }
 
     fn create_test_transaction_effects(
@@ -1192,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_to_epoch_basic() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for epochs 1, 2, 3
         let epoch1_txs = insert_test_data_for_epoch(&store, 1, 2);
@@ -1205,7 +1418,7 @@ mod tests {
         assert!(store.root_state_hash_by_epoch.get(&3).unwrap().is_some());
 
         // Rollback to epoch 1
-        store.rollback_to_epoch(1).unwrap();
+        store.rollback_to_epoch(1, &checkpoint_store).unwrap();
 
         // Verify epoch 1 data still exists
         assert!(store.root_state_hash_by_epoch.get(&1).unwrap().is_some());
@@ -1225,14 +1438,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_to_epoch_zero() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for epochs 1 and 2
         let epoch1_txs = insert_test_data_for_epoch(&store, 1, 2);
         let epoch2_txs = insert_test_data_for_epoch(&store, 2, 1);
 
         // Rollback to epoch 0 (should remove all data)
-        store.rollback_to_epoch(0).unwrap();
+        store.rollback_to_epoch(0, &checkpoint_store).unwrap();
 
         // Verify all data is removed
         assert!(store.root_state_hash_by_epoch.get(&1).unwrap().is_none());
@@ -1245,13 +1458,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_validation_prevents_future_epoch() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for epoch 1
         insert_test_data_for_epoch(&store, 1, 1);
 
         // Try to rollback to future epoch (should fail validation)
-        let result = store.rollback_to_epoch(5);
+        let result = store.rollback_to_epoch(5, &checkpoint_store);
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("Cannot rollback to future epoch"));
@@ -1260,7 +1473,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_statistics() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for multiple epochs
         insert_test_data_for_epoch(&store, 1, 2);
@@ -1271,7 +1484,7 @@ mod tests {
         let stats = store.get_rollback_statistics(1).unwrap();
 
         // Rollback to epoch 1
-        store.rollback_to_epoch(1).unwrap();
+        store.rollback_to_epoch(1, &checkpoint_store).unwrap();
 
         // Verify statistics contain expected data
         assert_eq!(stats.target_epoch, 1);
@@ -1281,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_atomic_operation() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for epochs 1 and 2
         let epoch1_txs = insert_test_data_for_epoch(&store, 1, 1);
@@ -1292,7 +1505,7 @@ mod tests {
         assert!(store.transactions.get(&epoch2_txs[0]).unwrap().is_some());
 
         // Perform rollback
-        store.rollback_to_epoch(1).unwrap();
+        store.rollback_to_epoch(1, &checkpoint_store).unwrap();
 
         // Verify atomic operation: epoch 1 data exists, epoch 2 data doesn't
         assert!(store.transactions.get(&epoch1_txs[0]).unwrap().is_some());
@@ -1301,13 +1514,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_same_epoch_is_noop() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Insert data for epoch 1
         let epoch1_txs = insert_test_data_for_epoch(&store, 1, 2);
 
         // Rollback to same epoch should succeed and be a no-op
-        store.rollback_to_epoch(1).unwrap();
+        store.rollback_to_epoch(1, &checkpoint_store).unwrap();
 
         // Verify all epoch 1 data still exists
         assert!(store.root_state_hash_by_epoch.get(&1).unwrap().is_some());
@@ -1318,16 +1531,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_with_no_data() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Rollback on empty store should succeed
-        let result = store.rollback_to_epoch(0);
+        let result = store.rollback_to_epoch(0, &checkpoint_store);
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_rollback_removes_object_versions() {
-        let (store, _temp_dir) = create_test_authority_store();
+        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Create test objects with different epochs
         let object_id = ObjectID::random();
@@ -1414,7 +1627,7 @@ mod tests {
             .unwrap();
 
         // Rollback to epoch 1
-        store.rollback_to_epoch(1).unwrap();
+        store.rollback_to_epoch(1, &checkpoint_store).unwrap();
 
         // Verify epoch 1 object still exists, epoch 2 object removed
         assert!(store

@@ -30,6 +30,8 @@ pub trait EpochStartSystemStateTrait {
     fn get_authority_names_to_peer_ids(&self) -> HashMap<AuthorityName, PeerId>;
     fn get_authority_names_to_hostnames(&self) -> HashMap<AuthorityName, String>;
     fn get_narwhal_worker_cache(&self, transactions_address: &Multiaddr) -> WorkerCache;
+    fn set_epoch(&mut self, epoch: EpochId);
+    fn set_epoch_start_timestamp_ms(&mut self, epoch_start_timestamp_ms: u64);
 }
 
 /// This type captures the minimum amount of information from MgoSystemState needed by a validator
@@ -268,6 +270,15 @@ impl EpochStartSystemStateTrait for EpochStartSystemStateV1 {
             epoch: self.epoch,
         }
     }
+
+    fn set_epoch(&mut self,epoch:EpochId) {
+        self.epoch = epoch;
+    }
+
+    fn set_epoch_start_timestamp_ms(&mut self,epoch_start_timestamp_ms:u64) {
+        self.epoch_start_timestamp_ms = epoch_start_timestamp_ms;
+    }
+
 }
 
 #[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]

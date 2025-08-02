@@ -786,17 +786,20 @@ impl MgoNode {
             epoch_id, 
             None
         )?);
+
+        let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
+        checkpoint_store.rollback_to_epoch(epoch_id)?;
         
         let perpetual_options = default_db_options().optimize_db_for_write_throughput(4);
         let perpetual_tables = Arc::new(AuthorityPerpetualTables::open(
             &config.db_path().join("store"),
             Some(perpetual_options.options),
         ));
-        
-        perpetual_tables.rollback_to_epoch(epoch_id)?;
+
+        perpetual_tables.rollback_to_epoch(epoch_id, &checkpoint_store)?;
         
         let genesis = config.genesis()?;
-        let store = AuthorityStore::open(
+        let store = AuthorityStore::restore_authority(
             perpetual_tables,
             genesis,
             config.indirect_objects_threshold,
@@ -804,6 +807,7 @@ impl MgoNode {
                 .expensive_safety_check_config
                 .enable_epoch_mgo_conservation_check(),
             &prometheus_registry,
+            epoch_id,
         )
         .await?;
 
@@ -817,9 +821,6 @@ impl MgoNode {
             .expect("EpochStartConfiguration of the current epoch must exist");
         let cache_metrics = Arc::new(ResolverMetrics::new(&prometheus_registry));
         let signature_verifier_metrics = SignatureVerifierMetrics::new(&prometheus_registry);
-
-        let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
-        checkpoint_store.rollback_to_epoch(epoch_id)?;
 
         let epoch_options = default_db_options().optimize_db_for_write_throughput(4);
         let epoch_store = AuthorityPerEpochStore::rollback_to_epoch(
@@ -835,7 +836,6 @@ impl MgoNode {
             &config.expensive_safety_check_config,
             ChainIdentifier::from(*genesis.checkpoint().digest()),
             epoch_id,
-            checkpoint_store.clone(),
         )?;
         replay_log!(
             "Beginning replay run. Epoch: {:?}, Protocol config: {:?}",

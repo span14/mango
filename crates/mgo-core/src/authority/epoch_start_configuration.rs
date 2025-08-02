@@ -25,6 +25,8 @@ pub trait EpochStartConfigTrait {
     fn authenticator_obj_initial_shared_version(&self) -> Option<SequenceNumber>;
     fn randomness_obj_initial_shared_version(&self) -> Option<SequenceNumber>;
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber>;
+    fn set_epoch_digest(&mut self, epoch_digest: CheckpointDigest);
+    fn set_system_state(&mut self, epoch_start_state: EpochStartSystemState);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -79,7 +81,7 @@ impl EpochStartConfiguration {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartConfigurationV1 {
     system_state: EpochStartSystemState,
     /// epoch_digest is defined as following
@@ -89,14 +91,14 @@ pub struct EpochStartConfigurationV1 {
     epoch_digest: CheckpointDigest,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartConfigurationV2 {
     system_state: EpochStartSystemState,
     epoch_digest: CheckpointDigest,
     flags: Vec<EpochFlag>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartConfigurationV3 {
     system_state: EpochStartSystemState,
     epoch_digest: CheckpointDigest,
@@ -105,7 +107,7 @@ pub struct EpochStartConfigurationV3 {
     authenticator_obj_initial_shared_version: Option<SequenceNumber>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartConfigurationV4 {
     system_state: EpochStartSystemState,
     epoch_digest: CheckpointDigest,
@@ -115,7 +117,7 @@ pub struct EpochStartConfigurationV4 {
     randomness_obj_initial_shared_version: Option<SequenceNumber>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 pub struct EpochStartConfigurationV5 {
     system_state: EpochStartSystemState,
     epoch_digest: CheckpointDigest,
@@ -159,6 +161,14 @@ impl EpochStartConfigTrait for EpochStartConfigurationV1 {
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber> {
         None
     }
+
+    fn set_epoch_digest(&mut self,epoch_digest:CheckpointDigest) {
+        self.epoch_digest = epoch_digest;
+    }
+
+    fn set_system_state(&mut self,epoch_start_state:EpochStartSystemState) {
+        self.system_state = epoch_start_state;
+    }
 }
 
 impl EpochStartConfigTrait for EpochStartConfigurationV2 {
@@ -185,6 +195,15 @@ impl EpochStartConfigTrait for EpochStartConfigurationV2 {
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber> {
         None
     }
+
+    fn set_epoch_digest(&mut self,epoch_digest:CheckpointDigest) {
+        self.epoch_digest = epoch_digest;
+    }
+
+    fn set_system_state(&mut self,epoch_start_state:EpochStartSystemState) {
+        self.system_state = epoch_start_state;
+    }
+
 }
 
 impl EpochStartConfigTrait for EpochStartConfigurationV3 {
@@ -210,6 +229,14 @@ impl EpochStartConfigTrait for EpochStartConfigurationV3 {
 
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber> {
         None
+    }
+
+    fn set_epoch_digest(&mut self,epoch_digest:CheckpointDigest) {
+        self.epoch_digest = epoch_digest;
+    }
+
+    fn set_system_state(&mut self,epoch_start_state:EpochStartSystemState) {
+        self.system_state = epoch_start_state;
     }
 }
 
@@ -237,6 +264,14 @@ impl EpochStartConfigTrait for EpochStartConfigurationV4 {
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber> {
         None
     }
+
+    fn set_epoch_digest(&mut self,epoch_digest:CheckpointDigest) {
+        self.epoch_digest = epoch_digest;
+    }
+
+    fn set_system_state(&mut self,epoch_start_state:EpochStartSystemState) {
+        self.system_state = epoch_start_state;
+    }
 }
 
 impl EpochStartConfigTrait for EpochStartConfigurationV5 {
@@ -263,6 +298,15 @@ impl EpochStartConfigTrait for EpochStartConfigurationV5 {
     fn coin_deny_list_obj_initial_shared_version(&self) -> Option<SequenceNumber> {
         self.coin_deny_list_obj_initial_shared_version
     }
+
+    fn set_epoch_digest(&mut self,epoch_digest:CheckpointDigest) {
+        self.epoch_digest = epoch_digest;
+    }
+
+    fn set_system_state(&mut self,epoch_start_state:EpochStartSystemState) {
+        self.system_state = epoch_start_state;
+    }
+
 }
 
 impl EpochFlag {

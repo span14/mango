@@ -669,18 +669,24 @@ impl CheckpointStore {
 
     /// Rollback checkpoint store to target epoch by removing all checkpoints after the target epoch's last checkpoint
     pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<()> {
-        info!("Rolling back CheckpointStore to epoch {}", target_epoch);
+        info!("Rolling back CheckpointStore to beginning of epoch {}", target_epoch);
         
-        // Get the last checkpoint of the target epoch
-        let target_last_checkpoint = self
-            .get_epoch_last_checkpoint(target_epoch)?
-            .ok_or_else(|| MgoError::Rollback(format!(
-                "No last checkpoint found for target epoch {}",
-                target_epoch
-            )))?;
+        // For rollback to beginning of epoch N, we need to find the last checkpoint of epoch N-1
+        let target_checkpoint = if target_epoch == 0 {
+            // Special case for epoch 0: keep genesis checkpoint (seq 0)
+            self.get_checkpoint_by_sequence_number(0)?
+                .ok_or_else(|| MgoError::Rollback("Genesis checkpoint not found".to_string()))?
+        } else {
+            // Get the last checkpoint of the previous epoch
+            self.get_epoch_last_checkpoint(target_epoch - 1)?
+                .ok_or_else(|| MgoError::Rollback(format!(
+                    "No last checkpoint found for previous epoch {}",
+                    target_epoch - 1
+                )))?
+        };
         
-        let target_seq = *target_last_checkpoint.sequence_number();
-        info!("Target epoch {} ends at checkpoint {}", target_epoch, target_seq);
+        let target_seq = *target_checkpoint.sequence_number();
+        info!("Rolling back to checkpoint {} (last checkpoint before epoch {})", target_seq, target_epoch);
         
         let mut batch = self.certified_checkpoints.batch();
         let mut checkpoints_to_remove = Vec::new();
@@ -720,10 +726,11 @@ impl CheckpointStore {
             }
         }
         
-        // Remove epoch last checkpoint mappings for epochs after target
+        // Remove epoch last checkpoint mappings for epochs >= target_epoch
+        // For beginning-of-epoch rollback, we need to remove the target epoch mapping too
         for result in self.epoch_last_checkpoint_map.unbounded_iter() {
             let (epoch_id, _) = result;
-            if epoch_id > target_epoch {
+            if epoch_id >= target_epoch {
                 epochs_to_remove.push(epoch_id);
             }
         }
@@ -755,7 +762,7 @@ impl CheckpointStore {
                 if seq > target_seq {
                     batch.insert_batch(
                         &self.watermarks, 
-                        std::iter::once((watermark, (target_seq, *target_last_checkpoint.digest())))
+                        std::iter::once((watermark, (target_seq, *target_checkpoint.digest())))
                     )?;
                 }
             }

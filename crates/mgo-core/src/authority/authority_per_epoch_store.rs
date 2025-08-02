@@ -51,7 +51,7 @@ use super::epoch_start_configuration::EpochStartConfigTrait;
 use crate::authority::epoch_start_configuration::{EpochFlag, EpochStartConfiguration};
 use crate::authority::ResolverWrapper;
 use crate::checkpoints::{
-    BuilderCheckpointSummary, CheckpointCommitHeight, CheckpointServiceNotify, CheckpointStore,
+    BuilderCheckpointSummary, CheckpointCommitHeight, CheckpointServiceNotify,
     EpochStats, PendingCheckpoint, PendingCheckpointInfo,
 };
 
@@ -846,7 +846,6 @@ impl AuthorityPerEpochStore {
         expensive_safety_check_config: &ExpensiveSafetyCheckConfig,
         chain_identifier: ChainIdentifier,
         target_epoch: EpochId,
-        checkpoint_store: Arc<CheckpointStore>,
     ) -> MgoResult<Arc<Self>> {
         let current_time = Instant::now();
         let epoch_id = committee.epoch;
@@ -859,27 +858,16 @@ impl AuthorityPerEpochStore {
             )));
         }
 
-        info!("Starting rollback to epoch {} with pending state cleanup", target_epoch);
+        info!("Starting rollback to beginning of epoch {} with ALL pending state cleanup", target_epoch);
 
-        // Phase 1: Clean up per-epoch databases for epochs > target_epoch
+        // Phase 1: Clean up per-epoch databases for epochs >= target_epoch
+        // This will remove the target epoch database entirely and recreate it fresh
         Self::cleanup_future_epoch_databases(parent_path, target_epoch)?;
 
-        // Phase 2: Open tables for target epoch and clean pending states above checkpoint
+        // Phase 2: Open fresh tables for target epoch
         let tables = AuthorityEpochTables::open(epoch_id, parent_path, db_options.clone());
         
-        // Get the highest checkpoint in the target epoch
-        let highest_checkpoint = checkpoint_store
-            .get_epoch_last_checkpoint(target_epoch)?
-            .ok_or_else(|| MgoError::Rollback(format!(
-                "No checkpoints found for target epoch {}",
-                target_epoch
-            )))?;
-        
-        let checkpoint_seq = highest_checkpoint.sequence_number();
-        info!("Cleaning pending states above checkpoint {} in epoch {}", checkpoint_seq, target_epoch);
-
-        // Clean pending states in the target epoch
-        Self::cleanup_pending_states_above_checkpoint(&tables, *checkpoint_seq)?;
+        info!("Opened fresh database tables for epoch {} - all previous state cleared", target_epoch);
 
         // Now proceed with normal initialization but with clean state
         let end_of_publish =
@@ -1018,15 +1006,15 @@ impl AuthorityPerEpochStore {
     fn cleanup_future_epoch_databases(parent_path: &Path, target_epoch: EpochId) -> MgoResult<()> {
         use typed_store::rocks::safe_drop_db;
         
-        info!("Cleaning up per-epoch databases for epochs > {}", target_epoch);
+        info!("Cleaning up per-epoch databases for epochs >= {}", target_epoch);
         
         // Scan for epoch databases that need to be removed
         // Each epoch database is stored at: parent_path/epoch_X
         let mut epochs_to_remove = Vec::new();
         
-        // First, find all epochs > target_epoch by checking if their paths exist
-        // We'll check a reasonable range of epochs after target_epoch
-        for epoch in (target_epoch + 1)..(target_epoch + 1000) {
+        // First, find all epochs >= target_epoch by checking if their paths exist
+        // We'll check a reasonable range of epochs starting from target_epoch
+        for epoch in target_epoch..(target_epoch + 1000) {
             let epoch_path = AuthorityEpochTables::path(epoch, parent_path);
             if epoch_path.exists() {
                 epochs_to_remove.push((epoch, epoch_path));
@@ -1054,72 +1042,72 @@ impl AuthorityPerEpochStore {
         Ok(())
     }
 
-    /// Cleans pending states in the current epoch that are above the given checkpoint
-    fn cleanup_pending_states_above_checkpoint(
-        tables: &AuthorityEpochTables,
-        checkpoint_seq: CheckpointSequenceNumber,
-    ) -> MgoResult<()> {
-        // Clean pending_execution table
-        let mut pending_to_remove = Vec::new();
-        for result in tables.pending_execution.unbounded_iter() {
-            let (digest, _) = result;
-            // Remove all pending executions as they should be re-submitted if needed
-            pending_to_remove.push(digest);
-        }
+    // /// Cleans pending states in the current epoch that are above the given checkpoint
+    // fn cleanup_pending_states_above_checkpoint(
+    //     tables: &AuthorityEpochTables,
+    //     checkpoint_seq: CheckpointSequenceNumber,
+    // ) -> MgoResult<()> {
+    //     // Clean pending_execution table
+    //     let mut pending_to_remove = Vec::new();
+    //     for result in tables.pending_execution.unbounded_iter() {
+    //         let (digest, _) = result;
+    //         // Remove all pending executions as they should be re-submitted if needed
+    //         pending_to_remove.push(digest);
+    //     }
         
-        if !pending_to_remove.is_empty() {
-            info!("Removing {} pending executions", pending_to_remove.len());
-            for digest in pending_to_remove {
-                tables.pending_execution.remove(&digest)?;
-            }
-        }
+    //     if !pending_to_remove.is_empty() {
+    //         info!("Removing {} pending executions", pending_to_remove.len());
+    //         for digest in pending_to_remove {
+    //             tables.pending_execution.remove(&digest)?;
+    //         }
+    //     }
 
-        // Clean pending_consensus_transactions table
-        let mut consensus_to_remove = Vec::new();
-        for result in tables.pending_consensus_transactions.unbounded_iter() {
-            let (key, _) = result;
-            // Remove all pending consensus transactions as they should be re-submitted if valid
-            consensus_to_remove.push(key);
-        }
+    //     // Clean pending_consensus_transactions table
+    //     let mut consensus_to_remove = Vec::new();
+    //     for result in tables.pending_consensus_transactions.unbounded_iter() {
+    //         let (key, _) = result;
+    //         // Remove all pending consensus transactions as they should be re-submitted if valid
+    //         consensus_to_remove.push(key);
+    //     }
         
-        if !consensus_to_remove.is_empty() {
-            info!("Removing {} pending consensus transactions", consensus_to_remove.len());
-            for key in consensus_to_remove {
-                tables.pending_consensus_transactions.remove(&key)?;
-            }
-        }
+    //     if !consensus_to_remove.is_empty() {
+    //         info!("Removing {} pending consensus transactions", consensus_to_remove.len());
+    //         for key in consensus_to_remove {
+    //             tables.pending_consensus_transactions.remove(&key)?;
+    //         }
+    //     }
 
-        // Clean pending_checkpoints table
-        // Remove all pending checkpoints with height > checkpoint sequence
-        let mut checkpoints_to_remove = Vec::new();
-        for result in tables.pending_checkpoints.unbounded_iter() {
-            let (height, _) = result;
-            // Since checkpoint height generally corresponds to sequence number,
-            // remove those above our target checkpoint
-            if height as u64 > checkpoint_seq {
-                checkpoints_to_remove.push(height);
-            }
-        }
+    //     // Clean pending_checkpoints table
+    //     // Remove all pending checkpoints with height > checkpoint sequence
+    //     let mut checkpoints_to_remove = Vec::new();
+    //     for result in tables.pending_checkpoints.unbounded_iter() {
+    //         let (height, _) = result;
+    //         // Since checkpoint height generally corresponds to sequence number,
+    //         // remove those above our target checkpoint
+    //         if height as u64 > checkpoint_seq {
+    //             checkpoints_to_remove.push(height);
+    //         }
+    //     }
         
-        if !checkpoints_to_remove.is_empty() {
-            info!("Removing {} pending checkpoints above sequence {}", 
-                  checkpoints_to_remove.len(), checkpoint_seq);
-            for height in checkpoints_to_remove {
-                tables.pending_checkpoints.remove(&height)?;
-            }
-        }
+    //     if !checkpoints_to_remove.is_empty() {
+    //         info!("Removing {} pending checkpoints above sequence {}", 
+    //               checkpoints_to_remove.len(), checkpoint_seq);
+    //         for height in checkpoints_to_remove {
+    //             tables.pending_checkpoints.remove(&height)?;
+    //         }
+    //     }
 
-        // Reset consensus processing state
-        // Clear consensus_message_processed for safety
-        tables.consensus_message_processed.unsafe_clear()?;
+    //     // Reset consensus processing state
+    //     // Clear consensus_message_processed for safety
+    //     tables.consensus_message_processed.unsafe_clear()?;
         
-        // Reset last consensus index to ensure proper restart
-        tables.last_consensus_index.remove(&LAST_CONSENSUS_STATS_ADDR)?;
-        tables.last_consensus_stats.remove(&LAST_CONSENSUS_STATS_ADDR)?;
+    //     // Reset last consensus index to ensure proper restart
+    //     tables.last_consensus_index.remove(&LAST_CONSENSUS_STATS_ADDR)?;
+    //     tables.last_consensus_stats.remove(&LAST_CONSENSUS_STATS_ADDR)?;
 
-        info!("Completed cleanup of pending states above checkpoint {}", checkpoint_seq);
-        Ok(())
-    }
+    //     info!("Completed cleanup of pending states above checkpoint {}", checkpoint_seq);
+    //     Ok(())
+    // }
 
     pub fn tables(&self) -> MgoResult<Arc<AuthorityEpochTables>> {
         match self.tables.load_full() {
