@@ -8027,6 +8027,7 @@ dependencies = [
  "prometheus",
  "reqwest",
  "serde",
+ "serde_json",
  "snap",
  "tap",
  "telemetry-subscribers",

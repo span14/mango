@@ -26,6 +26,7 @@ git-version.workspace = true
 const-str.workspace = true
 url.workspace = true
 humantime.workspace = true
+serde_json.workspace = true
 
 mgo-archival.workspace = true
 mgo-tls.workspace = true
