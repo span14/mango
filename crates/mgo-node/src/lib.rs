@@ -133,13 +133,13 @@ pub mod metrics;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkAddressOverride {
     /// Main MGO validator service address
-    pub mgo_net_address: Option<Multiaddr>,
+    pub mgo_net_address: Multiaddr,
     /// P2P discovery and gossip address  
-    pub p2p_address: Option<Multiaddr>,
+    pub p2p_address: Multiaddr,
     /// Narwhal consensus primary address
-    pub narwhal_primary_address: Option<Multiaddr>,
+    pub narwhal_primary_address: Multiaddr,
     /// Narwhal consensus worker address
-    pub narwhal_worker_address: Option<Multiaddr>,
+    pub narwhal_worker_address: Multiaddr,
 }
 
 pub struct ValidatorComponents {
@@ -770,6 +770,14 @@ impl MgoNode {
             );
             config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
         }
+        let node_address: MgoAddress = MgoAddress::from(config.protocol_key_pair().public());
+        if let Some(network_address_overrides) = network_address_overrides.clone() {
+            let _ = network_address_overrides.get(&node_address).map_or((), |addresses| {
+                config.network_address = addresses.mgo_net_address.clone();
+                config.p2p_config.external_address = Some(addresses.p2p_address.clone());
+            });
+        }
+
         let run_with_range = config.run_with_range;
         let is_validator = config.consensus_config().is_some();
         let is_full_node = !is_validator;
@@ -780,7 +788,8 @@ impl MgoNode {
         DBMetrics::init(&prometheus_registry);
         mango_metrics::init_metrics(&prometheus_registry);
 
-        let secret = Arc::pin(config.protocol_key_pair().copy());
+        let secret = Arc::pin(config.protocol_key_pair().copy());        
+
         let committee_store = Arc::new(CommitteeStore::restore_committee(
             config.db_path().join("epochs"), 
             epoch_id, 
@@ -2028,18 +2037,10 @@ pub fn apply_network_address_overrides(
             );
             
             // Apply overrides for each address type if provided
-            if let Some(ref new_address) = override_info.mgo_net_address {
-                validator_info.mgo_net_address = new_address.clone();
-            }
-            if let Some(ref new_address) = override_info.p2p_address {
-                validator_info.p2p_address = new_address.clone();
-            }
-            if let Some(ref new_address) = override_info.narwhal_primary_address {
-                validator_info.narwhal_primary_address = new_address.clone();
-            }
-            if let Some(ref new_address) = override_info.narwhal_worker_address {
-                validator_info.narwhal_worker_address = new_address.clone();
-            }
+            validator_info.mgo_net_address = override_info.mgo_net_address.clone();
+            validator_info.p2p_address = override_info.p2p_address.clone();
+            validator_info.narwhal_primary_address = override_info.narwhal_primary_address.clone();
+            validator_info.narwhal_worker_address = override_info.narwhal_worker_address.clone();
         }
     }
     
