@@ -42,7 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use mgo_protocol_config::ProtocolVersion;
-use mgo_types::base_types::{AuthorityName, EpochId, TransactionDigest};
+use mgo_types::base_types::{AuthorityName, EpochId, TransactionDigest, TransactionEffectsDigest};
 use mgo_types::committee::StakeUnit;
 use mgo_types::crypto::AuthorityStrongQuorumSignInfo;
 use mgo_types::digests::{CheckpointContentsDigest, CheckpointDigest};
@@ -69,7 +69,7 @@ use tracing::{debug, error, info, instrument, warn};
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 use typed_store::Map;
 use typed_store::{
-    rocks::{DBMap, MetricConf},
+    rocks::{DBMap, DBBatch, MetricConf},
     TypedStoreError,
 };
 use typed_store_derive::DBMapUtils;
@@ -668,7 +668,7 @@ impl CheckpointStore {
     }
 
     /// Rollback checkpoint store to target epoch by removing all checkpoints after the target epoch's last checkpoint
-    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<()> {
+    pub fn rollback_to_epoch(&self, target_epoch: EpochId, batch: &mut DBBatch) -> MgoResult<(Vec<TransactionDigest>, Vec<TransactionEffectsDigest>)> {
         info!("Rolling back CheckpointStore to beginning of epoch {}", target_epoch);
         
         // For rollback to beginning of epoch N, we need to find the last checkpoint of epoch N-1
@@ -684,93 +684,169 @@ impl CheckpointStore {
                     target_epoch - 1
                 )))?
         };
-        
+
         let target_seq = *target_checkpoint.sequence_number();
         info!("Rolling back to checkpoint {} (last checkpoint before epoch {})", target_seq, target_epoch);
-        
-        let mut batch = self.certified_checkpoints.batch();
-        let mut checkpoints_to_remove = Vec::new();
-        let mut contents_to_remove = Vec::new();
-        let mut epochs_to_remove = Vec::new();
-        
+                
         // Remove certified checkpoints after target sequence
-        for result in self.certified_checkpoints.unbounded_iter() {
-            let (seq, checkpoint) = result;
-            if seq > target_seq {
-                checkpoints_to_remove.push(seq);
-                batch.delete_batch(&self.checkpoint_by_digest, std::iter::once(checkpoint.into_inner().digest()))?;
-            }
-        }
+        let max_certified_checkpoint = self.certified_checkpoints
+            .unbounded_iter()
+            .skip_to_last()
+            .next()
+            .map(|(seq, _)| seq)
+            .unwrap_or(target_seq);
+
+        let (
+            certified_checkpoint_digest_to_remove,
+            certified_checkpoint_content_digest_to_remove, 
+        ): (Vec<CheckpointDigest>, Vec<CheckpointContentsDigest>) = self.certified_checkpoints
+            .range_iter(target_seq + 1..max_certified_checkpoint + 1)
+            .map(|(_, checkpoint)| 
+                (
+                    checkpoint.inner().digest().clone(),
+                    checkpoint.inner().content_digest
+                )
+            )
+            .unzip();
+
+        let (
+            certified_transaction_digests_to_remove, 
+            certified_transaction_effect_digests_to_remove
+        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = self.checkpoint_content
+            .multi_get(&certified_checkpoint_content_digest_to_remove)?
+            .into_iter()
+            .filter(|c| c.is_some())
+            .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
+            .flatten()
+            .map(| ed | (ed.transaction, ed.effects))
+            .unzip();
         
-        // Remove checkpoint contents after target sequence
-        for result in self.checkpoint_sequence_by_contents_digest.unbounded_iter() {
-            let (digest, seq) = result;
-            if seq > target_seq {
-                contents_to_remove.push(digest);
-            }
-        }
+        batch.schedule_delete_range(&self.certified_checkpoints, &(target_seq+1), &(max_certified_checkpoint+1))?;
+        info!("Added {} certified checkpoints to remove", max_certified_checkpoint - target_seq);
         
-        // Remove full checkpoint contents after target sequence
-        for result in self.full_checkpoint_content.unbounded_iter() {
-            let (seq, _) = result;
-            if seq > target_seq {
-                batch.delete_batch(&self.full_checkpoint_content, std::iter::once(&seq))?;
-            }
-        }
+        batch.delete_batch(&self.checkpoint_by_digest, &certified_checkpoint_digest_to_remove)?;
+        info!("Added {} certified checkpoint digests to remove", certified_checkpoint_digest_to_remove.len());
+
+        // Remove state synced checkpoint after target sequence
+        let max_state_synced_checkpoint = self.full_checkpoint_content
+            .unbounded_iter()
+            .skip_to_last()
+            .next()
+            .map(|(seq, _)| seq)
+            .unwrap_or(target_seq);
+        
+        let state_synced_checkpoint_to_remove = self.full_checkpoint_content
+            .range_iter(target_seq + 1..max_state_synced_checkpoint + 1)
+            .map(|(_, checkpoint)| checkpoint)
+            .collect::<Vec<_>>();
+
+        let state_synced_checkpoint_content_digests_to_remove = state_synced_checkpoint_to_remove
+            .iter()
+            .map(|checkpoint| checkpoint.checkpoint_contents().digest().clone())
+            .collect::<Vec<_>>();
+
+        let (
+            state_synced_execution_digests_to_remove,
+            state_synced_effect_digests_to_remove,
+        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = state_synced_checkpoint_to_remove
+            .iter()
+            .map(|checkpoint| {
+                checkpoint.checkpoint_contents().iter().cloned().collect::<Vec<_>>()
+            })
+            .flatten()
+            .map(|ed| (ed.transaction, ed.effects))
+            .unzip();
+        
+        batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
+        info!("Added {} state synced checkpoints to remove", state_synced_checkpoint_to_remove.len());
         
         // Remove locally computed checkpoints after target sequence
-        for result in self.locally_computed_checkpoints.unbounded_iter() {
-            let (seq, _) = result;
-            if seq > target_seq {
-                batch.delete_batch(&self.locally_computed_checkpoints, std::iter::once(&seq))?;
-            }
-        }
+        let max_locally_computed_checkpoint = self.locally_computed_checkpoints
+            .unbounded_iter()
+            .skip_to_last()
+            .next()
+            .map(|(seq, _)| seq)
+            .unwrap_or(target_seq);
         
+        let locally_computed_checkpoint_to_remove = self.locally_computed_checkpoints
+            .range_iter(target_seq + 1..max_locally_computed_checkpoint + 1)
+            .map(|(_, checkpoint)| checkpoint)
+            .collect::<Vec<_>>();
+        
+        let locally_computed_checkpoint_content_digests_to_remove = locally_computed_checkpoint_to_remove
+            .iter()
+            .map(|checkpoint| checkpoint.content_digest)
+            .collect::<Vec<_>>();
+        
+        let (
+            locally_computed_execution_digests_to_remove,
+            locally_computed_effect_digests_to_remove,
+        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = self.checkpoint_content
+            .multi_get(&locally_computed_checkpoint_content_digests_to_remove)?
+            .into_iter()
+            .filter(|c| c.is_some())
+            .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
+            .flatten()
+            .map(| ed | (ed.transaction, ed.effects))
+            .unzip();
+
+        batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
+        info!("Added {} locally computed checkpoints to remove", locally_computed_checkpoint_to_remove.len());
+        
+        let combined_checkpoint_content_digest = HashSet::<CheckpointContentsDigest>::from_iter(
+            certified_checkpoint_content_digest_to_remove
+                .into_iter()
+                .chain(state_synced_checkpoint_content_digests_to_remove.into_iter())
+                .chain(locally_computed_checkpoint_content_digests_to_remove.into_iter())
+        ).into_iter().collect::<Vec<_>>();
+
+        batch.delete_batch(&self.checkpoint_content, &combined_checkpoint_content_digest)?;
+        info!("Added {} combined checkpoint contents to remove", combined_checkpoint_content_digest.len());
+        
+        batch.delete_batch(&self.checkpoint_sequence_by_contents_digest, &combined_checkpoint_content_digest)?;
+        info!("Added {} combined checkpoint sequence to remove", combined_checkpoint_content_digest.len());
+
         // Remove epoch last checkpoint mappings for epochs >= target_epoch
         // For beginning-of-epoch rollback, we need to remove the target epoch mapping too
-        for result in self.epoch_last_checkpoint_map.unbounded_iter() {
-            let (epoch_id, _) = result;
-            if epoch_id >= target_epoch {
-                epochs_to_remove.push(epoch_id);
-            }
-        }
-        
-        // Execute deletions
-        if !checkpoints_to_remove.is_empty() {
-            info!("Removing {} certified checkpoints", checkpoints_to_remove.len());
-            batch.delete_batch(&self.certified_checkpoints, checkpoints_to_remove.iter())?;
-        }
-        
-        if !contents_to_remove.is_empty() {
-            info!("Removing {} checkpoint contents", contents_to_remove.len());
-            batch.delete_batch(&self.checkpoint_content, contents_to_remove.iter())?;
-            batch.delete_batch(&self.checkpoint_sequence_by_contents_digest, contents_to_remove.iter())?;
-        }
-        
-        if !epochs_to_remove.is_empty() {
-            info!("Removing epoch mappings for {} epochs", epochs_to_remove.len());
-            batch.delete_batch(&self.epoch_last_checkpoint_map, epochs_to_remove.iter())?;
-        }
+        let max_epoch = self.epoch_last_checkpoint_map
+            .unbounded_iter()
+            .skip_to_last()
+            .next()
+            .map(|(epoch_id, _)| epoch_id)
+            .unwrap_or(target_epoch);
+        batch.schedule_delete_range(&self.epoch_last_checkpoint_map, &target_epoch, &(max_epoch+1))?;
+        info!("Added {} epochs to remove", max_epoch - target_epoch + 1);
         
         // Update watermarks to not exceed target checkpoint
+        let mut watermark_update = vec![];
         for watermark in [
             CheckpointWatermark::HighestVerified,
             CheckpointWatermark::HighestSynced,
             CheckpointWatermark::HighestExecuted,
+            CheckpointWatermark::HighestPruned,
         ] {
-            if let Some((seq, _digest)) = self.watermarks.get(&watermark)? {
-                if seq > target_seq {
-                    batch.insert_batch(
-                        &self.watermarks, 
-                        std::iter::once((watermark, (target_seq, *target_checkpoint.digest())))
-                    )?;
-                }
-            }
+            watermark_update.push((
+                watermark,
+                (target_seq, target_checkpoint.digest().clone()),
+            ))
         }
+        batch.insert_batch(&self.watermarks, watermark_update)?;
+
+        let combined_transaction_digest = HashSet::<TransactionDigest>::from_iter(
+            certified_transaction_digests_to_remove
+                .into_iter()
+                .chain(state_synced_execution_digests_to_remove.into_iter())
+                .chain(locally_computed_execution_digests_to_remove.into_iter())
+        ).into_iter().collect::<Vec<_>>();
         
-        batch.write()?;
-        info!("Successfully rolled back CheckpointStore to epoch {}", target_epoch);
-        Ok(())
+        let combined_effects_digest = HashSet::<TransactionEffectsDigest>::from_iter(
+            certified_transaction_effect_digests_to_remove
+                .into_iter()
+                .chain(state_synced_effect_digests_to_remove.into_iter())
+                .chain(locally_computed_effect_digests_to_remove.into_iter())
+        ).into_iter().collect::<Vec<_>>();
+        
+        Ok((combined_transaction_digest, combined_effects_digest))
     }
 
     pub fn reset_db_for_execution_since_genesis(&self) -> MgoResult {

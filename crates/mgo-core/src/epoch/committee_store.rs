@@ -14,6 +14,7 @@ use typed_store::traits::{TableSummary, TypedStoreDebug};
 
 use typed_store::Map;
 use typed_store_derive::DBMapUtils;
+use typed_store::rocks::DBBatch;
 
 use mgo_macros::nondeterministic;
 
@@ -54,7 +55,7 @@ impl CommitteeStore {
         store
     }
 
-    pub fn restore_committee(path: PathBuf, target_epoch: EpochId, db_options: Option<Options>) -> MgoResult<Self> {
+    pub fn restore_committee(path: PathBuf, target_epoch: EpochId, db_options: Option<Options>) -> MgoResult<(Self, DBBatch)> {
         let tables = CommitteeStoreTables::open_tables_read_write(
             path,
             MetricConf::new("committee"),
@@ -64,8 +65,9 @@ impl CommitteeStore {
 
         let max_epoch = tables.committee_map
             .unbounded_iter()
-            .map(|(id, _)| id)
-            .max()
+            .skip_to_last()
+            .next()
+            .map(|(epoch_id, _)| epoch_id)
             .unwrap_or(0);
 
         // TODO: restore the cache by [EPOCH_ID - n, EPOCH_ID]
@@ -88,9 +90,10 @@ impl CommitteeStore {
         }
 
         // Remove committee decision after target epoch
-        store.tables.committee_map.multi_remove(target_epoch + 1..=max_epoch)?;
+        let mut batch = store.tables.committee_map.batch();
+        batch.schedule_delete_range(&store.tables.committee_map, &(target_epoch + 1), &(max_epoch + 1))?;
         
-        Ok(store)
+        Ok((store, batch))
     }
 
 
