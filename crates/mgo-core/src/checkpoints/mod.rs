@@ -69,7 +69,7 @@ use tracing::{debug, error, info, instrument, warn};
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 use typed_store::Map;
 use typed_store::{
-    rocks::{DBMap, DBBatch, MetricConf},
+    rocks::{default_db_options, DBMap, DBBatch, MetricConf, DBOptions, ReadWriteOptions},
     TypedStoreError,
 };
 use typed_store_derive::DBMapUtils;
@@ -115,19 +115,24 @@ pub struct CheckpointStore {
     /// Stores entire checkpoint contents from state sync, indexed by sequence number, for
     /// efficient reads of full checkpoints. Entries from this table are deleted after state
     /// accumulation has completed.
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     full_checkpoint_content: DBMap<CheckpointSequenceNumber, FullCheckpointContents>,
 
     /// Stores certified checkpoints
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     pub(crate) certified_checkpoints: DBMap<CheckpointSequenceNumber, TrustedCheckpoint>,
+
     /// Map from checkpoint digest to certified checkpoint
     pub(crate) checkpoint_by_digest: DBMap<CheckpointDigest, TrustedCheckpoint>,
 
     /// Store locally computed checkpoint summaries so that we can detect forks and log useful
     /// information. Can be pruned as soon as we verify that we are in agreement with the latest
     /// certified checkpoint.
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     pub(crate) locally_computed_checkpoints: DBMap<CheckpointSequenceNumber, CheckpointSummary>,
 
     /// A map from epoch ID to the sequence number of the last checkpoint in that epoch.
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     epoch_last_checkpoint_map: DBMap<EpochId, CheckpointSequenceNumber>,
 
     /// Watermarks used to determine the highest verified, fully synced, and
@@ -2049,6 +2054,14 @@ impl CheckpointServiceNotify for CheckpointServiceNoop {
 impl PendingCheckpoint {
     pub fn height(&self) -> CheckpointCommitHeight {
         self.details.commit_height
+    }
+}
+
+fn range_delete_enabled_table_default_config() -> DBOptions {
+    DBOptions {
+        options: default_db_options()
+            .options,
+        rw_options: ReadWriteOptions::default().set_ignore_range_deletions(false),
     }
 }
 

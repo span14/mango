@@ -9,7 +9,7 @@ use std::sync::Arc;
 use mgo_types::base_types::ObjectID;
 use mgo_types::committee::{Committee, EpochId};
 use mgo_types::error::{MgoError, MgoResult};
-use typed_store::rocks::{default_db_options, DBMap, DBOptions, MetricConf};
+use typed_store::rocks::{default_db_options, DBMap, DBOptions, MetricConf, ReadWriteOptions};
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 
 use typed_store::Map;
@@ -32,7 +32,10 @@ pub struct CommitteeStoreTables {
 
 // These functions are used to initialize the DB tables
 fn committee_table_default_config() -> DBOptions {
-    default_db_options().optimize_for_point_lookup(64)
+    DBOptions {
+        options: default_db_options().optimize_for_point_lookup(64).options,
+        rw_options: ReadWriteOptions::default().set_ignore_range_deletions(false),
+    }
 }
 
 impl CommitteeStore {

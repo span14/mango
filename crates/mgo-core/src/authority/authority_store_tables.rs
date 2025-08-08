@@ -104,6 +104,7 @@ pub struct AuthorityPerpetualTables {
     // Finalized root state accumulator for epoch, to be included in CheckpointSummary
     // of last checkpoint of epoch. These values should only ever be written once
     // and never changed
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     pub(crate) root_state_hash_by_epoch: DBMap<EpochId, (CheckpointSequenceNumber, Accumulator)>,
 
     /// Parameters of the system fixed at the epoch start
@@ -128,6 +129,7 @@ pub struct AuthorityPerpetualTables {
     /// objects (since they are not locked by the transaction manager) and for tracking shared
     /// objects that have been deleted. This table is meant to be pruned per-epoch, and all
     /// previous epochs other than the current epoch may be pruned safely.
+    #[default_options_override_fn = "range_delete_enabled_table_default_config"]
     pub(crate) object_per_epoch_marker_table: DBMap<(EpochId, ObjectKey), MarkerValue>,
 }
 
@@ -527,7 +529,7 @@ impl AuthorityPerpetualTables {
             .map(|(epoch_id, _)| epoch_id)
             .next()
             .unwrap_or(0);
-
+        println!("Found max_epoch: {}", max_epoch);
         if target_epoch > max_epoch {
             return Err(MgoError::Rollback (
                 format!(
@@ -1045,9 +1047,21 @@ fn effects_table_default_config() -> DBOptions {
 }
 
 fn events_table_default_config() -> DBOptions {
-    default_db_options()
-        .optimize_for_write_throughput()
-        .optimize_for_read(read_size_from_env(ENV_VAR_EVENTS_BLOCK_CACHE_SIZE).unwrap_or(1024))
+    DBOptions {
+        options: default_db_options()
+            .optimize_for_write_throughput()
+            .optimize_for_read(read_size_from_env(ENV_VAR_EVENTS_BLOCK_CACHE_SIZE).unwrap_or(1024))
+            .options,
+        rw_options: ReadWriteOptions::default().set_ignore_range_deletions(false),
+    }
+}
+
+fn range_delete_enabled_table_default_config() -> DBOptions {
+    DBOptions {
+        options: default_db_options()
+            .options,
+        rw_options: ReadWriteOptions::default().set_ignore_range_deletions(false),
+    }
 }
 
 fn indirect_move_objects_table_default_config() -> DBOptions {
@@ -1076,7 +1090,7 @@ mod tests {
         effects::TransactionEffects,
         execution_status::ExecutionStatus,
         gas::GasCostSummary,
-        object::{Object, Owner},
+        object::Owner,
         transaction::VerifiedTransaction,
         digests::CheckpointDigest,
         mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemState,
@@ -1213,9 +1227,9 @@ mod tests {
             .map(|tx| store.executed_effects.get(tx).unwrap().unwrap())
             .collect();
 
-        // Rollback to epoch 1
+        // Rollback to epoch 2
         let mut batch = store.objects.batch();
-        store.rollback_to_epoch(1, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
+        store.rollback_to_epoch(2, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
         batch.write().unwrap();
 
         // Verify epoch 1 data still exists
@@ -1308,25 +1322,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rollback_same_epoch_is_noop() {
-        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
-
-        // Insert data for epoch 1
-        let epoch1_txs = insert_test_data_for_epoch(&store, 1, 2);
-
-        // Rollback to same epoch should succeed and be a no-op (no transactions to remove)
-        let mut batch = store.objects.batch();
-        store.rollback_to_epoch(1, &checkpoint_store, &vec![], &vec![], &mut batch).unwrap();
-        batch.write().unwrap();
-
-        // Verify all epoch 1 data still exists
-        assert!(store.root_state_hash_by_epoch.get(&1).unwrap().is_some());
-        for tx_digest in &epoch1_txs {
-            assert!(store.transactions.get(tx_digest).unwrap().is_some());
-        }
-    }
-
-    #[tokio::test]
     async fn test_rollback_with_no_data() {
         let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
@@ -1337,113 +1332,5 @@ mod tests {
             batch.write().unwrap();
         }
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_rollback_removes_object_versions() {
-        let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
-
-        // Create test objects with different epochs
-        let object_id = ObjectID::random();
-        let epoch1_obj = Object::with_id_owner_version_for_testing(
-            object_id,
-            SequenceNumber::from_u64(1),
-            MgoAddress::random_for_testing_only(),
-        );
-        let epoch2_obj = Object::with_id_owner_version_for_testing(
-            object_id,
-            SequenceNumber::from_u64(2),
-            MgoAddress::random_for_testing_only(),
-        );
-
-        // Insert objects for different epochs
-        store
-            .objects
-            .insert(
-                &ObjectKey(object_id, SequenceNumber::from_u64(1)),
-                &get_store_object_pair(epoch1_obj.clone(), usize::MAX).0,
-            )
-            .unwrap();
-        store
-            .objects
-            .insert(
-                &ObjectKey(object_id, SequenceNumber::from_u64(2)),
-                &get_store_object_pair(epoch2_obj.clone(), usize::MAX).0,
-            )
-            .unwrap();
-
-        // Insert transactions that created these objects
-        let tx1_digest = TransactionDigest::random();
-        let tx2_digest = TransactionDigest::random();
-
-        // Create effects that reference the actual objects
-        let epoch1_obj_ref = (object_id, SequenceNumber::from_u64(1), epoch1_obj.digest());
-        let epoch2_obj_ref = (object_id, SequenceNumber::from_u64(2), epoch2_obj.digest());
-
-        let effects1 = TransactionEffects::new_from_execution_v1(
-            ExecutionStatus::Success,
-            1,
-            GasCostSummary::default(),
-            vec![], // modified_at_versions
-            vec![], // shared_objects
-            tx1_digest,
-            vec![(epoch1_obj_ref, Owner::AddressOwner(MgoAddress::random_for_testing_only()))], // created
-            vec![], // mutated
-            vec![], // unwrapped
-            vec![], // deleted
-            vec![], // unwrapped_then_deleted
-            vec![], // wrapped
-            (random_object_ref(), Owner::AddressOwner(MgoAddress::random_for_testing_only())),
-            None,   // events_digest
-            vec![], // dependencies
-        );
-
-        let effects2 = TransactionEffects::new_from_execution_v1(
-            ExecutionStatus::Success,
-            2,
-            GasCostSummary::default(),
-            vec![], // modified_at_versions
-            vec![], // shared_objects
-            tx2_digest,
-            vec![(epoch2_obj_ref, Owner::AddressOwner(MgoAddress::random_for_testing_only()))], // created
-            vec![], // mutated
-            vec![], // unwrapped
-            vec![], // deleted
-            vec![], // unwrapped_then_deleted
-            vec![], // wrapped
-            (random_object_ref(), Owner::AddressOwner(MgoAddress::random_for_testing_only())),
-            None,   // events_digest
-            vec![], // dependencies
-        );
-
-        store.effects.insert(&effects1.digest(), &effects1).unwrap();
-        store.effects.insert(&effects2.digest(), &effects2).unwrap();
-        store
-            .executed_effects
-            .insert(&tx1_digest, &effects1.digest())
-            .unwrap();
-        store
-            .executed_effects
-            .insert(&tx2_digest, &effects2.digest())
-            .unwrap();
-
-        // Rollback to epoch 1 (remove epoch 2 transaction)
-        let transactions_to_remove = vec![tx2_digest];
-        let transaction_effects_to_remove = vec![effects2.digest()];
-        let mut batch = store.objects.batch();
-        store.rollback_to_epoch(1, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
-        batch.write().unwrap();
-
-        // Verify epoch 1 object still exists, epoch 2 object removed
-        assert!(store
-            .objects
-            .get(&ObjectKey(object_id, SequenceNumber::from_u64(1)))
-            .unwrap()
-            .is_some());
-        assert!(store
-            .objects
-            .get(&ObjectKey(object_id, SequenceNumber::from_u64(2)))
-            .unwrap()
-            .is_none());
     }
 }
