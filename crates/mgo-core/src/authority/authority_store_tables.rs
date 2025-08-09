@@ -1324,7 +1324,7 @@ mod tests {
         // Rollback on empty store should succeed
         let result = store.rollback_to_epoch(0, &checkpoint_store, &vec![], &vec![]);
         if result.is_ok() {
-            batch.write().unwrap();
+            result.unwrap().write().unwrap();
         }
         assert!(result.is_ok());
     }
