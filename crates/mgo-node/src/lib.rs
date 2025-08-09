@@ -818,6 +818,11 @@ impl MgoNode {
             &transaction_digests_to_remove, 
             &transaction_effect_digests_to_remove,
         )?;
+
+        committee_batch.write()?;
+        checkpoint_batch.write()?;
+        perpetual_batch.write()?;
+        info!("Removed obsolete state from database.");
         
         let genesis = config.genesis()?;
         let store = AuthorityStore::restore_authority(
@@ -1058,11 +1063,6 @@ impl MgoNode {
 
         // setup shutdown channel
         let (shutdown_channel, _) = broadcast::channel::<Option<RunWithRange>>(1);
-
-        committee_batch.write()?;
-        checkpoint_batch.write()?;
-        perpetual_batch.write()?;
-        info!("Removed obsolete state from database.");
 
         let node = Self {
             config,
