@@ -517,10 +517,10 @@ impl AuthorityPerpetualTables {
         checkpoint_store: &Arc<CheckpointStore>,
         transactions_to_remove: &Vec<TransactionDigest>,
         transaction_effects_to_remove: &Vec<TransactionEffectsDigest>,
-        batch: &mut DBBatch   
-    ) -> MgoResult<()> {
+    ) -> MgoResult<DBBatch> {
         info!("Starting rollback to epoch {} for perpetual table", target_epoch);
 
+        let mut batch = self.objects.batch();
         // Validate rollback parameters
         // Check if target epoch is higher than any existing epoch in storage
         let max_epoch = self.root_state_hash_by_epoch
@@ -645,9 +645,9 @@ impl AuthorityPerpetualTables {
         info!("Added {} of object epoch markers to remove", marker_objects_to_remove.len());
 
         // Phase 6: Update singleton tables to target epoch state
-        self.rollback_singleton_tables(batch, target_epoch, checkpoint_store, &transaction_effects_to_clean)?;
+        self.rollback_singleton_tables(&mut batch, target_epoch, checkpoint_store, &transaction_effects_to_clean)?;
 
-        Ok(())
+        Ok(batch)
     }
 
     fn rollback_singleton_tables(
@@ -1228,8 +1228,7 @@ mod tests {
             .collect();
 
         // Rollback to epoch 2
-        let mut batch = store.objects.batch();
-        store.rollback_to_epoch(2, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
+        let batch = store.rollback_to_epoch(2, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove).unwrap();
         batch.write().unwrap();
 
         // Verify epoch 1 data still exists
@@ -1263,8 +1262,7 @@ mod tests {
             .collect();
 
         // Rollback to epoch 0 (should remove all data)
-        let mut batch = store.objects.batch();
-        store.rollback_to_epoch(0, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
+        let batch = store.rollback_to_epoch(0, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove).unwrap();
         batch.write().unwrap();
 
         // Verify all data is removed
@@ -1284,8 +1282,7 @@ mod tests {
         insert_test_data_for_epoch(&store, 1, 1);
 
         // Try to rollback to future epoch (should fail validation)
-        let mut batch = store.objects.batch();
-        let result = store.rollback_to_epoch(5, &checkpoint_store, &vec![], &vec![], &mut batch);
+        let result = store.rollback_to_epoch(5, &checkpoint_store, &vec![], &vec![]);
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("Cannot rollback to future epoch"));
@@ -1312,8 +1309,7 @@ mod tests {
             .collect();
 
         // Perform rollback
-        let mut batch = store.objects.batch();
-        store.rollback_to_epoch(1, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove, &mut batch).unwrap();
+        let batch = store.rollback_to_epoch(1, &checkpoint_store, &transactions_to_remove, &transaction_effects_to_remove).unwrap();
         batch.write().unwrap();
 
         // Verify atomic operation: epoch 1 data exists, epoch 2 data doesn't
@@ -1326,8 +1322,7 @@ mod tests {
         let (store, checkpoint_store, _temp_dir) = create_test_authority_store();
 
         // Rollback on empty store should succeed
-        let mut batch = store.objects.batch();
-        let result = store.rollback_to_epoch(0, &checkpoint_store, &vec![], &vec![], &mut batch);
+        let result = store.rollback_to_epoch(0, &checkpoint_store, &vec![], &vec![]);
         if result.is_ok() {
             batch.write().unwrap();
         }

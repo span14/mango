@@ -790,7 +790,7 @@ impl MgoNode {
 
         let secret = Arc::pin(config.protocol_key_pair().copy());        
 
-        let (committee_store, mut batch) = CommitteeStore::restore_committee(
+        let (committee_store, committee_batch) = CommitteeStore::restore_committee(
             config.db_path().join("epochs"), 
             epoch_id, 
             None
@@ -801,9 +801,10 @@ impl MgoNode {
         let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
         let (
             transaction_digests_to_remove, 
-            transaction_effect_digests_to_remove
+            transaction_effect_digests_to_remove,
+            checkpoint_batch
         ) = 
-            checkpoint_store.rollback_to_epoch(epoch_id, &mut batch)?;
+            checkpoint_store.rollback_to_epoch(epoch_id)?;
         
         let perpetual_options = default_db_options().optimize_db_for_write_throughput(4);
         let perpetual_tables = Arc::new(AuthorityPerpetualTables::open(
@@ -811,12 +812,11 @@ impl MgoNode {
             Some(perpetual_options.options),
         ));
 
-        perpetual_tables.rollback_to_epoch(
+        let perpetual_batch = perpetual_tables.rollback_to_epoch(
             epoch_id, 
             &checkpoint_store,
             &transaction_digests_to_remove, 
             &transaction_effect_digests_to_remove,
-            &mut batch
         )?;
         
         let genesis = config.genesis()?;
@@ -1059,7 +1059,9 @@ impl MgoNode {
         // setup shutdown channel
         let (shutdown_channel, _) = broadcast::channel::<Option<RunWithRange>>(1);
 
-        batch.write()?;
+        committee_batch.write()?;
+        checkpoint_batch.write()?;
+        perpetual_batch.write()?;
         info!("Removed obsolete state from database.");
 
         let node = Self {

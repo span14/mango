@@ -673,9 +673,9 @@ impl CheckpointStore {
     }
 
     /// Rollback checkpoint store to target epoch by removing all checkpoints after the target epoch's last checkpoint
-    pub fn rollback_to_epoch(&self, target_epoch: EpochId, batch: &mut DBBatch) -> MgoResult<(Vec<TransactionDigest>, Vec<TransactionEffectsDigest>)> {
+    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<(Vec<TransactionDigest>, Vec<TransactionEffectsDigest>, DBBatch)> {
         info!("Rolling back CheckpointStore to beginning of epoch {}", target_epoch);
-        
+        let mut batch = self.checkpoint_content.batch();
         // For rollback to beginning of epoch N, we need to find the last checkpoint of epoch N-1
         let target_checkpoint = if target_epoch == 0 {
             // Special case for epoch 0: keep genesis checkpoint (seq 0)
@@ -851,7 +851,7 @@ impl CheckpointStore {
                 .chain(locally_computed_effect_digests_to_remove.into_iter())
         ).into_iter().collect::<Vec<_>>();
         
-        Ok((combined_transaction_digest, combined_effects_digest))
+        Ok((combined_transaction_digest, combined_effects_digest, batch))
     }
 
     pub fn reset_db_for_execution_since_genesis(&self) -> MgoResult {
