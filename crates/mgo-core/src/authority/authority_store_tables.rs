@@ -635,14 +635,18 @@ impl AuthorityPerpetualTables {
             .map(|((epoch_id,_), _)| epoch_id)
             .next()
             .unwrap_or(target_epoch);
+        
+        if max_marker_epoch >= target_epoch {
+            let marker_objects_to_remove = self.object_per_epoch_marker_table
+                .range_iter((target_epoch, ObjectKey::ZERO)..(max_marker_epoch + 1, ObjectKey::ZERO))
+                .map(|((_, obj), _)| obj)
+                .collect::<Vec<_>>();
 
-        let marker_objects_to_remove = self.object_per_epoch_marker_table
-            .range_iter((target_epoch, ObjectKey::ZERO)..(max_marker_epoch + 1, ObjectKey::ZERO))
-            .map(|((_, obj), _)| obj)
-            .collect::<Vec<_>>();
-
-        batch.schedule_delete_range(&self.object_per_epoch_marker_table, &(target_epoch, ObjectKey::ZERO), &(max_marker_epoch + 1, ObjectKey::ZERO))?;
-        info!("Added {} of object epoch markers to remove", marker_objects_to_remove.len());
+            batch.schedule_delete_range(&self.object_per_epoch_marker_table, &(target_epoch, ObjectKey::ZERO), &(max_marker_epoch + 1, ObjectKey::ZERO))?;
+            info!("Added {} of object epoch markers to remove", marker_objects_to_remove.len());
+        } else {
+            info!("Zero object epoch markers to remove");
+        }
 
         // Phase 6: Update singleton tables to target epoch state
         self.rollback_singleton_tables(&mut batch, target_epoch, checkpoint_store, &transaction_effects_to_clean)?;
