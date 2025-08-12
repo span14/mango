@@ -531,21 +531,16 @@ impl AuthorityPerpetualTables {
             .unwrap_or(0);
 
         if target_epoch > max_epoch {
-            return Err(MgoError::Rollback (
-                format!(
-                    "Cannot rollback to future epoch {} in AuthorityStore. Maximum existing epoch is {}",
-                    target_epoch, max_epoch
-                )
-            ));
+            warn!("Missing root state hash. Potentially trying to roll back to future epoch {}. Current max epoch is {}", target_epoch, max_epoch);
+        } else {
+            info!(
+                "Rollback validation passed: target_epoch={}, max_existing_epoch={}",
+                target_epoch, max_epoch
+            );
+
+            batch.schedule_delete_range(&self.root_state_hash_by_epoch, &target_epoch, &(max_epoch+1))?;
+            info!("Added {} of root state hashes to remove", max_epoch + 1 - target_epoch);
         }
-
-        info!(
-            "Rollback validation passed: target_epoch={}, max_existing_epoch={}",
-            target_epoch, max_epoch
-        );
-
-        batch.schedule_delete_range(&self.root_state_hash_by_epoch, &target_epoch, &(max_epoch+1))?;
-        info!("Added {} of root state hashes to remove", max_epoch + 1 - target_epoch);
 
         // Remove transactions
         batch.delete_batch(&self.transactions, transactions_to_remove.iter())?;
