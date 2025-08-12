@@ -80,12 +80,12 @@ impl CommitteeStore {
         };
 
         if target_epoch > max_epoch {
-            return Err(MgoError::GenericAuthorityError {
-                error: format!(
+            return Err(MgoError::Rollback (
+                format!(
                     "Cannot rollback to future epoch {} in CommitteeStore. Maximum existing epoch is {}",
                     target_epoch, max_epoch
                 ),
-            });
+            ));
         }
 
         if store.get_committee(&target_epoch)?.is_none() {

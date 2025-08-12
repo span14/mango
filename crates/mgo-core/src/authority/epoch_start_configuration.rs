@@ -36,7 +36,7 @@ pub enum EpochFlag {
 }
 
 /// Parameters of the epoch fixed at epoch start.
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Deserialize, Debug, Eq, PartialEq)]
 #[enum_dispatch(EpochStartConfigTrait)]
 pub enum EpochStartConfiguration {
     V1(EpochStartConfigurationV1),

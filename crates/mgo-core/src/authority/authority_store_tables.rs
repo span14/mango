@@ -296,6 +296,14 @@ impl AuthorityPerpetualTables {
             .epoch())
     }
 
+    pub fn get_epoch_start_configuration(&self) -> MgoResult<EpochStartConfiguration> {
+        Ok(self
+            .epoch_start_configuration
+            .get(&())?
+            .expect("Must have current epoch.")
+            .clone())
+    }
+
     pub async fn set_epoch_start_configuration(
         &self,
         epoch_start_configuration: &EpochStartConfiguration,

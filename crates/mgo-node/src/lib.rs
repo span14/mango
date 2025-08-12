@@ -823,9 +823,22 @@ impl MgoNode {
         checkpoint_batch.write()?;
         perpetual_batch.write()?;
         info!("Removed obsolete state from database.");
+
+        let mut epoch_start_configuration = perpetual_tables
+            .get_epoch_start_configuration()?;
+
+        // Apply network address overrides if provided during rollback
+        let epoch_start_state = if let Some(ref overrides) = network_address_overrides {
+            info!("Applying network address overrides for {} validators", overrides.len());
+            apply_network_address_overrides(epoch_start_configuration.epoch_start_state(), overrides)?
+        } else {
+            epoch_start_configuration.epoch_start_state().clone()
+        };
+        epoch_start_configuration.set_system_state(epoch_start_state.clone());
+        perpetual_tables.set_epoch_start_configuration(&epoch_start_configuration).await?;
         
         let genesis = config.genesis()?;
-        let store = AuthorityStore::restore_authority(
+        let store = AuthorityStore::open(
             perpetual_tables,
             genesis,
             config.indirect_objects_threshold,
@@ -833,7 +846,6 @@ impl MgoNode {
                 .expensive_safety_check_config
                 .enable_epoch_mgo_conservation_check(),
             &prometheus_registry,
-            epoch_id,
         )
         .await?;
 
@@ -842,9 +854,6 @@ impl MgoNode {
         let committee = committee_store
             .get_committee(&cur_epoch)?
             .expect("Committee of the current epoch must exist");
-        let epoch_start_configuration = store
-            .get_epoch_start_configuration()?
-            .expect("EpochStartConfiguration of the current epoch must exist");
         let cache_metrics = Arc::new(ResolverMetrics::new(&prometheus_registry));
         let signature_verifier_metrics = SignatureVerifierMetrics::new(&prometheus_registry);
 
@@ -912,18 +921,7 @@ impl MgoNode {
             archive_readers.clone(),
             &prometheus_registry,
         )?;
-
-        // We must explicitly send this instead of relying on the initial value to trigger
-        // watch value change, so that state-sync is able to process it.
-        
-        // Apply network address overrides if provided during rollback
-        let epoch_start_state = if let Some(ref overrides) = network_address_overrides {
-            info!("Applying network address overrides for {} validators", overrides.len());
-            apply_network_address_overrides(epoch_store.epoch_start_state(), overrides)?
-        } else {
-            epoch_store.epoch_start_state().clone()
-        };
-        
+    
         send_trusted_peer_change(
             &config,
             &trusted_peer_change_tx,
