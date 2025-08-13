@@ -826,6 +826,7 @@ impl CheckpointStore {
         let mut watermark_update = vec![];
         for watermark in [
             CheckpointWatermark::HighestVerified,
+            CheckpointWatermark::HighestExecuted,
             CheckpointWatermark::HighestSynced,
             CheckpointWatermark::HighestPruned,
         ] {
@@ -833,17 +834,6 @@ impl CheckpointStore {
                 watermark,
                 (target_seq, target_checkpoint.digest().clone()),
             ))
-        }
-        if target_seq > 0 {
-            let highest_executed_checkpoint = self.certified_checkpoints
-                .get(&(target_seq - 1))?
-                .expect("Must have executed checkpoint at target sequence - 1.");
-            watermark_update.push((
-                CheckpointWatermark::HighestExecuted,
-                (target_seq - 1, highest_executed_checkpoint.inner().digest().clone()),
-            ))
-        } else {
-            batch.delete_batch(&self.watermarks, [CheckpointWatermark::HighestExecuted])?;
         }
         batch.insert_batch(&self.watermarks, watermark_update)?;
 
