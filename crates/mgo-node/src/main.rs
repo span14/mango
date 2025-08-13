@@ -62,6 +62,9 @@ struct Args {
 
     #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
     network_overrides_file: Option<PathBuf>,
+    
+    #[clap(long, requires = "rollback_to_epoch", help = "Act as bootstrap leader after rollback to create first checkpoint")]
+    bootstrap_leader_after_rollback: bool,
 }
 
 fn main() {

@@ -821,6 +821,8 @@ impl MgoNode {
             epoch_id,
         )?;
 
+        info!("Rollback to epoch {} completed. CheckpointBuilder will handle bootstrap checkpoint creation if needed.", epoch_id);
+
         Ok(())
 
     }
@@ -1942,6 +1944,9 @@ pub fn build_http_server(
 
     Ok(Some(handle))
 }
+
+
+
 
 #[cfg(not(test))]
 fn max_tx_per_checkpoint(protocol_config: &ProtocolConfig) -> usize {

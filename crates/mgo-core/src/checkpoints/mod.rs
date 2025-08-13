@@ -882,6 +882,7 @@ pub struct CheckpointBuilder {
     metrics: Arc<CheckpointMetrics>,
     max_transactions_per_checkpoint: usize,
     max_checkpoint_size_bytes: usize,
+    is_rollback_recovery: bool, 
 }
 
 pub struct CheckpointAggregator {
@@ -922,6 +923,10 @@ impl CheckpointBuilder {
         max_transactions_per_checkpoint: usize,
         max_checkpoint_size_bytes: usize,
     ) -> Self {
+        let is_rollback_recovery = 
+            epoch_store.last_built_checkpoint_commit_height().unwrap().is_none() &&
+            epoch_store.epoch() > 0;
+
         Self {
             state,
             tables,
@@ -935,11 +940,16 @@ impl CheckpointBuilder {
             metrics,
             max_transactions_per_checkpoint,
             max_checkpoint_size_bytes,
+            is_rollback_recovery
         }
     }
 
     async fn run(mut self) {
         info!("Starting CheckpointBuilder");
+        if self.is_rollback_recovery && self.is_bootstrap_leader() {
+            info!("Creating bootstrap checkpoint after rollback");
+            let _ = self.create_bootstrap_checkpoint().await.unwrap();
+        }
         'main: loop {
             // Check whether an exit signal has been received, if so we break the loop.
             // This gives us a chance to exit, in case checkpoint making keeps failing.
@@ -1443,6 +1453,34 @@ impl CheckpointBuilder {
             roots = effects;
         }
         Ok(results)
+    }
+
+
+    async fn create_bootstrap_checkpoint(&self) -> anyhow::Result<()> {
+        // Create empty checkpoint with no transactions
+        let empty_roots = vec![];
+        let details = PendingCheckpointInfo {
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            last_of_epoch: false,
+            commit_height: 0,  // Special height for bootstrap
+        };
+
+        let pending = PendingCheckpoint {
+            roots: empty_roots,
+            details,
+        };
+
+        // Process like normal checkpoint
+        self.make_checkpoint(0, pending).await?;
+        Ok(())
+    }
+
+    fn is_bootstrap_leader(&self) -> bool {
+        let committee = self.epoch_store.committee();
+        let mut authorities: Vec<_> = committee.names().collect();
+        authorities.sort();
+
+        authorities.first() == Some(&&self.state.name)
     }
 }
 
