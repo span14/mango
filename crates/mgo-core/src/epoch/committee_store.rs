@@ -58,7 +58,7 @@ impl CommitteeStore {
         store
     }
 
-    pub fn restore_committee(path: PathBuf, target_epoch: EpochId, db_options: Option<Options>) -> MgoResult<(Self, DBBatch)> {
+    pub fn restore_committee(path: PathBuf, target_epoch: EpochId, db_options: Option<Options>) -> MgoResult<DBBatch> {
         let tables = CommitteeStoreTables::open_tables_read_write(
             path,
             MetricConf::new("committee"),
@@ -73,12 +73,6 @@ impl CommitteeStore {
             .map(|(epoch_id, _)| epoch_id)
             .unwrap_or(0);
 
-        // TODO: restore the cache by [EPOCH_ID - n, EPOCH_ID]
-        let store = Self {
-            tables,
-            cache: RwLock::new(HashMap::new()),
-        };
-
         if target_epoch > max_epoch {
             return Err(MgoError::Rollback (
                 format!(
@@ -88,15 +82,11 @@ impl CommitteeStore {
             ));
         }
 
-        if store.get_committee(&target_epoch)?.is_none() {
-            return Err(MgoError::MissingCommitteeAtEpoch(target_epoch));
-        }
-
         // Remove committee decision after target epoch
-        let mut batch = store.tables.committee_map.batch();
-        batch.schedule_delete_range(&store.tables.committee_map, &(target_epoch + 1), &(max_epoch + 1))?;
+        let mut batch = tables.committee_map.batch();
+        batch.schedule_delete_range(&tables.committee_map, &(target_epoch + 1), &(max_epoch + 1))?;
         
-        Ok((store, batch))
+        Ok(batch)
     }
 
 

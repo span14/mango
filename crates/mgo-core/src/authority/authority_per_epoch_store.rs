@@ -834,19 +834,9 @@ impl AuthorityPerEpochStore {
     /// 2. Single-epoch cleanup: For the target epoch, removes pending states above the highest checkpoint
     #[instrument(name = "AuthorityPerEpochStore::rollback_to_epoch", level = "error", skip_all, fields(target_epoch = target_epoch))]
     pub fn rollback_to_epoch(
-        name: AuthorityName,
-        new_committee: Arc<Committee>,
         parent_path: &Path,
-        db_options: Option<Options>,
-        metrics: Arc<EpochMetrics>,
-        epoch_start_configuration: EpochStartConfiguration,
-        execution_cache: Arc<ExecutionCache>,
-        cache_metrics: Arc<ResolverMetrics>,
-        signature_verifier_metrics: Arc<SignatureVerifierMetrics>,
-        expensive_safety_check_config: &ExpensiveSafetyCheckConfig,
-        chain_identifier: ChainIdentifier,
         target_epoch: EpochId,
-    ) -> MgoResult<Arc<Self>> {
+    ) -> MgoResult<()> {
         use typed_store::rocks::safe_drop_db;
         
         info!("Cleaning up per-epoch databases for epochs >= {}", target_epoch);
@@ -881,20 +871,8 @@ impl AuthorityPerEpochStore {
                 }
             }
         }
-        
-        Ok(AuthorityPerEpochStore::new(
-            name,
-            new_committee,
-            parent_path,
-            db_options,
-            metrics,
-            epoch_start_configuration,
-            execution_cache,
-            cache_metrics,
-            signature_verifier_metrics,
-            expensive_safety_check_config,
-            chain_identifier,
-        ))
+
+        Ok(())
     }
 
     pub fn tables(&self) -> MgoResult<Arc<AuthorityEpochTables>> {

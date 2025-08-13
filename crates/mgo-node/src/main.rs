@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::{ArgGroup, Parser};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +14,13 @@ use mango_common::sync::async_once_cell::AsyncOnceCell;
 use mgo_config::node::RunWithRange;
 use mgo_config::{Config, NodeConfig};
 use mgo_core::runtime::MgoRuntimes;
-use mgo_node::metrics;
+use mgo_node::{self, metrics};
 use mgo_protocol_config::SupportedProtocolVersions;
 use mgo_telemetry::send_telemetry_event;
+use mgo_types::base_types::MgoAddress;
 use mgo_types::committee::EpochId;
 use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 use mgo_types::multiaddr::Multiaddr;
-use mgo_types::base_types::MgoAddress;
-use mgo_node::NetworkAddressOverride;
-use std::collections::HashMap;
-use std::fs;
 
 const GIT_REVISION: &str = {
     if let Some(revision) = option_env!("GIT_REVISION") {
@@ -59,11 +57,11 @@ struct Args {
     #[clap(long, group = "exclusive")]
     run_with_range_checkpoint: Option<CheckpointSequenceNumber>,
 
-    #[clap(long, help = "Rollback node to specified epoch")]
-    rollback_epoch: Option<EpochId>,
+    #[clap(long, group = "exclusive", help = "Rollback to a specific epoch")]
+    rollback_to_epoch: Option<EpochId>,
 
-    #[clap(long, help = "Path to JSON file containing network address mapping overrides for rollback")]
-    rollback_network_mapping: Option<PathBuf>,
+    #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
+    network_overrides_file: Option<PathBuf>,
 }
 
 fn main() {
@@ -82,6 +80,33 @@ fn main() {
         "supported_protocol_versions cannot be read from the config file"
     );
     config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
+
+    // Handle rollback if requested
+    if let Some(epoch_id) = args.rollback_to_epoch {
+        info!("Starting rollback to epoch {}", epoch_id);
+        
+        let network_overrides = if let Some(overrides_file) = args.network_overrides_file {
+            let overrides_json = std::fs::read_to_string(&overrides_file)
+                .expect("Failed to read network overrides file");
+            let overrides: HashMap<MgoAddress, mgo_node::NetworkAddressOverride> = 
+                serde_json::from_str(&overrides_json)
+                .expect("Failed to parse network overrides JSON");
+            Some(overrides)
+        } else {
+            None
+        };
+
+        // Execute rollback synchronously
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            mgo_node::MgoNode::rollback_by_epoch_async(&config, epoch_id, network_overrides)
+                .await
+                .expect("Rollback failed");
+        });
+        
+        info!("Rollback to epoch {} completed successfully", epoch_id);
+        return;
+    }
 
     // match run_with_range args
     // this means that we always modify the config used to start the node
@@ -141,55 +166,12 @@ fn main() {
     // let mgo-node signal main to shutdown runtimes
     let (runtime_shutdown_tx, runtime_shutdown_rx) = broadcast::channel::<()>(1);
 
-    // Capture rollback arguments
-    let rollback_epoch = args.rollback_epoch;
-    let rollback_network_mapping = args.rollback_network_mapping;
-
     runtimes.mgo_node.spawn(async move {
-        // Check if rollback is requested
-        let mgo_node_result = if let Some(rollback_epoch) = rollback_epoch {
-            info!("Starting node with rollback to epoch {}", rollback_epoch);
-            
-            // Parse network address overrides if provided
-            let network_address_overrides = if let Some(mapping_path) = rollback_network_mapping {
-                match fs::read_to_string(&mapping_path) {
-                    Ok(mapping_content) => {
-                        match serde_json::from_str::<HashMap<MgoAddress, NetworkAddressOverride>>(&mapping_content) {
-                            Ok(overrides) => {
-                                info!("Loaded network address overrides for {} validators", overrides.len());
-                                Some(overrides)
-                            }
-                            Err(e) => {
-                                error!("Failed to parse network mapping JSON from {:?}: {}", mapping_path, e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read network mapping file {:?}: {}", mapping_path, e);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                None
-            };
-            
-            mgo_node::MgoNode::rollback_by_epoch_async(
-                &config,
-                registry_service,
-                Some(rpc_runtime),
-                rollback_epoch,
-                network_address_overrides,
-            ).await
-        } else {
-            mgo_node::MgoNode::start_async(&config, registry_service, Some(rpc_runtime)).await
-        };
-
-        match mgo_node_result {
+        match mgo_node::MgoNode::start_async(&config, registry_service, Some(rpc_runtime)).await {
             Ok(mgo_node) => node_once_cell_clone
                 .set(mgo_node)
                 .expect("Failed to set node in AsyncOnceCell"),
-            
+
             Err(e) => {
                 error!("Failed to start node: {e:?}");
                 std::process::exit(1);

@@ -2,16 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{anyhow, bail, Result};
-use mango_metrics::RegistryService;
 use move_core_types::ident_str;
 use std::{
-    collections::{BTreeMap, HashSet, HashMap},
+    collections::{BTreeMap, HashSet},
     fmt::{self, Debug, Display, Formatter, Write},
     fs,
     path::PathBuf,
 };
-use mgo_node::{MgoNode, NetworkAddressOverride};
-use mgo_config::{ NodeConfig, PersistedConfig};
 use mgo_genesis_builder::validator_info::GenesisValidatorInfo;
 use mgo_types::{
     base_types::{ObjectID, ObjectRef, MgoAddress},
@@ -36,7 +33,6 @@ use fastcrypto::{
 };
 use serde::Serialize;
 use serde_json;
-use prometheus;
 use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
 use mgo_json_rpc_types::{
     MgoObjectDataOptions, MgoTransactionBlockResponse, MgoTransactionBlockResponseOptions,
@@ -167,20 +163,6 @@ pub enum MgoValidatorCommand {
         #[clap(name = "gas-budget", long)]
         gas_budget: Option<u64>,
     },
-    /// Rollback node to a specific epoch with optional network address mapping
-    #[clap(name = "rollback")]
-    Rollback {
-        /// Target epoch ID to rollback to
-        #[clap(name = "epoch-id")]
-        epoch_id: u64,
-        /// Path to JSON file containing network address mapping overrides
-        /// Format: {"validator_address": {"mgo_net_address": "addr", "p2p_address": "addr", ...}}
-        #[clap(name = "network-mapping", long)]
-        network_mapping: Option<PathBuf>,
-        /// Path to node configuration file
-        #[clap(long = "config-path")]
-        config_path: Option<PathBuf>,
-    },
 }
 
 #[derive(Serialize)]
@@ -198,11 +180,6 @@ pub enum MgoValidatorCommandResponse {
     DisplayGasPriceUpdateRawTxn {
         data: TransactionData,
         serialized_data: String,
-    },
-    Rollback {
-        success: bool,
-        message: String,
-        epoch_id: u64,
     },
 }
 
@@ -477,71 +454,8 @@ impl MgoValidatorCommand {
                     serialized_data,
                 }
             }
-            MgoValidatorCommand::Rollback { 
-                epoch_id, 
-                network_mapping, 
-                config_path 
-            } => {
-                Self::execute_rollback(epoch_id, network_mapping, config_path).await?
-            }
         });
         ret
-    }
-
-    async fn execute_rollback(
-        epoch_id: u64,
-        network_mapping: Option<PathBuf>,
-        config_path: Option<PathBuf>,
-    ) -> Result<MgoValidatorCommandResponse> {
-        // Load node configuration
-        let config_path = config_path.unwrap_or_else(|| {
-            mgo_config::mgo_config_dir()
-                .unwrap()
-                .join(mgo_config::MGO_NETWORK_CONFIG)
-        });
-        
-        let config: NodeConfig = PersistedConfig::read(&config_path)
-            .map_err(|e| anyhow!("Failed to read node config from {:?}: {}", config_path, e))?;
-
-        // Parse network address overrides if provided
-        let network_address_overrides = if let Some(mapping_path) = network_mapping {
-            let mapping_content = fs::read_to_string(&mapping_path)
-                .map_err(|e| anyhow!("Failed to read network mapping file {:?}: {}", mapping_path, e))?;
-            
-            let overrides: HashMap<MgoAddress, NetworkAddressOverride> = serde_json::from_str(&mapping_content)
-                .map_err(|e| anyhow!("Failed to parse network mapping JSON: {}", e))?;
-            
-            Some(overrides)
-        } else {
-            None
-        };
-
-        // Create registry service
-        let registry_service = RegistryService::new(prometheus::Registry::new());
-
-        // Execute rollback
-        match MgoNode::rollback_by_epoch_async(
-            &config,
-            registry_service,
-            None,
-            epoch_id,
-            network_address_overrides,
-        ).await {
-            Ok(_) => {
-                Ok(MgoValidatorCommandResponse::Rollback {
-                    success: true,
-                    message: format!("Successfully rolled back to epoch {}", epoch_id),
-                    epoch_id,
-                })
-            }
-            Err(e) => {
-                Ok(MgoValidatorCommandResponse::Rollback {
-                    success: false,
-                    message: format!("Rollback failed: {}", e),
-                    epoch_id,
-                })
-            }
-        }
     }
 }
 
@@ -773,18 +687,6 @@ impl Display for MgoValidatorCommandResponse {
                     writer,
                     "Transaction: {:?}, \nSerialized transaction: {:?}",
                     data, serialized_data
-                )?;
-            }
-            MgoValidatorCommandResponse::Rollback {
-                success,
-                message,
-                epoch_id,
-            } => {
-                let status_color = if *success { "✓".green() } else { "✗".red() };
-                write!(
-                    writer,
-                    "{} Rollback to epoch {}: {}",
-                    status_color, epoch_id, message
                 )?;
             }
         }
