@@ -936,6 +936,10 @@ impl AuthorityPerEpochStore {
         self.protocol_config().enable_coin_deny_list() && self.coin_deny_list_state_exists()
     }
 
+    pub fn get_authority_name(&self) -> AuthorityName {
+        self.name
+    }
+
     pub fn get_parent_path(&self) -> PathBuf {
         self.parent_path.clone()
     }
@@ -3018,6 +3022,18 @@ impl AuthorityPerEpochStore {
         index: &CheckpointCommitHeight,
     ) -> MgoResult<Option<PendingCheckpoint>> {
         Ok(self.tables()?.pending_checkpoints.get(index)?)
+    }
+
+    pub fn insert_pending_checkpoint(
+        &self, 
+        checkpoint: &PendingCheckpoint
+    ) -> MgoResult<()> {
+        let mut batch = self.tables()?.pending_checkpoints.batch();
+        batch.insert_batch(
+            &self.tables()?.pending_checkpoints,
+            std::iter::once((checkpoint.height(), checkpoint)),
+        )?;
+        Ok(batch.write()?)
     }
 
     pub fn process_pending_checkpoint(

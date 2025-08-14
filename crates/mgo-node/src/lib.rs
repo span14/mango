@@ -246,6 +246,9 @@ pub struct MgoNode {
     _state_snapshot_uploader_handle: Option<broadcast::Sender<()>>,
     // Channel to allow signaling upstream to shutdown mgo-node
     shutdown_channel_tx: broadcast::Sender<Option<RunWithRange>>,
+
+    // Rollback state restart
+    is_rollback_recovery: bool
 }
 
 impl fmt::Debug for MgoNode {
@@ -263,8 +266,9 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
+        is_rollback_recovery: bool
     ) -> Result<Arc<MgoNode>> {
-        Self::start_async(config, registry_service, custom_rpc_runtime).await
+        Self::start_async(config, registry_service, custom_rpc_runtime, is_rollback_recovery).await
     }
 
     fn start_jwk_updater(
@@ -406,6 +410,7 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
+        is_rollback_recovery: bool
     ) -> Result<Arc<MgoNode>> {
         NodeConfigMetrics::new(&registry_service.default_registry()).record_metrics(config);
         let mut config = config.clone();
@@ -706,6 +711,7 @@ impl MgoNode {
                 connection_monitor_status.clone(),
                 &registry_service,
                 mgo_node_metrics.clone(),
+                is_rollback_recovery,
             )
             .await?;
             // This is only needed during cold start.
@@ -744,6 +750,7 @@ impl MgoNode {
             _state_archive_handle: state_archive_handle,
             _state_snapshot_uploader_handle: state_snapshot_handle,
             shutdown_channel_tx: shutdown_channel,
+            is_rollback_recovery,
         };
 
         info!("MgoNode started!");
@@ -1107,6 +1114,7 @@ impl MgoNode {
         connection_monitor_status: Arc<ConnectionMonitorStatus>,
         registry_service: &RegistryService,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
+        is_rollback_recovery: bool
     ) -> Result<ValidatorComponents> {
         let consensus_config = config
             .consensus_config()
@@ -1183,6 +1191,7 @@ impl MgoNode {
             checkpoint_metrics,
             mgo_node_metrics,
             mgo_tx_validator_metrics,
+            is_rollback_recovery
         )
         .await
     }
@@ -1201,6 +1210,7 @@ impl MgoNode {
         checkpoint_metrics: Arc<CheckpointMetrics>,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
         mgo_tx_validator_metrics: Arc<MgoTxValidatorMetrics>,
+        is_rollback_recovery: bool
     ) -> Result<ValidatorComponents> {
         let (checkpoint_service, checkpoint_service_exit) = Self::start_checkpoint_service(
             config,
@@ -1256,7 +1266,14 @@ impl MgoNode {
                 ),
             )
             .await;
-
+        
+        if is_rollback_recovery {
+            info!("Rollback recovery mode: creating bootstrap checkpoint");
+            checkpoint_service
+                .create_bootstrap_checkpoint_for_rollback(&epoch_store)
+                .await?;
+        }
+        
         if epoch_store.authenticator_state_enabled() {
             Self::start_jwk_updater(
                 config,
@@ -1608,6 +1625,7 @@ impl MgoNode {
                             checkpoint_metrics,
                             self.metrics.clone(),
                             mgo_tx_validator_metrics,
+                            self.is_rollback_recovery,
                         )
                         .await?,
                     )
@@ -1641,6 +1659,7 @@ impl MgoNode {
                             self.connection_monitor_status.clone(),
                             &self.registry_service,
                             self.metrics.clone(),
+                            self.is_rollback_recovery,
                         )
                         .await?,
                     )

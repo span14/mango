@@ -63,8 +63,8 @@ struct Args {
     #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
     network_overrides_file: Option<PathBuf>,
     
-    #[clap(long, requires = "rollback_to_epoch", help = "Act as bootstrap leader after rollback to create first checkpoint")]
-    bootstrap_leader_after_rollback: bool,
+    #[clap(long, help = "Flag to indicate the validator start after rollback")]
+    is_rollback_recovery: bool,
 }
 
 fn main() {
@@ -102,7 +102,11 @@ fn main() {
         // Execute rollback synchronously
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            mgo_node::MgoNode::rollback_by_epoch_async(&config, epoch_id, network_overrides)
+            mgo_node::MgoNode::rollback_by_epoch_async(
+                &config, 
+                epoch_id, 
+                network_overrides,
+            )
                 .await
                 .expect("Rollback failed");
         });
@@ -170,7 +174,12 @@ fn main() {
     let (runtime_shutdown_tx, runtime_shutdown_rx) = broadcast::channel::<()>(1);
 
     runtimes.mgo_node.spawn(async move {
-        match mgo_node::MgoNode::start_async(&config, registry_service, Some(rpc_runtime)).await {
+        match mgo_node::MgoNode::start_async(
+            &config, 
+            registry_service, 
+            Some(rpc_runtime),
+            args.is_rollback_recovery,
+        ).await {
             Ok(mgo_node) => node_once_cell_clone
                 .set(mgo_node)
                 .expect("Failed to set node in AsyncOnceCell"),
