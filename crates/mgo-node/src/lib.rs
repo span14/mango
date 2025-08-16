@@ -1353,6 +1353,11 @@ impl MgoNode {
             
             // Insert the checkpoint directly into the store
             checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+            let empty_checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
+                std::iter::empty(),
+                vec![],
+            );
+            checkpoint_store.insert_checkpoint_contents(empty_checkpoint_contents)?;
             
             // Update the watermarks to mark this checkpoint as synced
             // This is critical for the node to recognize the rollback checkpoint as the starting point
