@@ -830,7 +830,7 @@ impl MgoNode {
     fn export_signed_checkpoint(
         checkpoint: &CheckpointSummary,
         signed_checkpoint: &AuthoritySignInfo,
-        db_path: &std::path::Path,
+        rollback_checkpoint_dir: &PathBuf,
         epoch_id: EpochId,
     ) -> Result<()> {
         use std::fs;
@@ -841,9 +841,9 @@ impl MgoNode {
             signature: AuthoritySignInfo,
         }
         
-        let authority_hex = format!("{:}", signed_checkpoint.authority);
+        let authority_hex = format!("{:10}", signed_checkpoint.authority);
         let filename = format!("rollback_checkpoint_epoch_{}_authority_{}.json", epoch_id, authority_hex);
-        let file_path = db_path.join(&filename);
+        let file_path = rollback_checkpoint_dir.join(&filename);
         
         let data = RollbackCheckpointData {
             checkpoint: checkpoint.clone(),
@@ -863,6 +863,7 @@ impl MgoNode {
         config: &NodeConfig,
         epoch_id: EpochId,
         network_address_overrides: Option<HashMap<MgoAddress, NetworkAddressOverride>>,
+        rollback_checkpoint_dir: PathBuf,
     ) -> Result<()> {
         let mut config = config.clone();
         if config.supported_protocol_versions.is_none() {
@@ -935,7 +936,7 @@ impl MgoNode {
             epoch_start_state.epoch_start_timestamp_ms(),
         )?;
         let signed_checkpoint = Self::sign_rollback_checkpoint(&rollback_checkpoint, &config)?;
-        Self::export_signed_checkpoint(&rollback_checkpoint, &signed_checkpoint, &config.db_path(), epoch_id)?;
+        Self::export_signed_checkpoint(&rollback_checkpoint, &signed_checkpoint, &rollback_checkpoint_dir, epoch_id)?;
         
         info!("Created and exported signed rollback checkpoint for epoch {}", epoch_id);
 

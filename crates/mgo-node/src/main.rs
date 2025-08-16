@@ -60,6 +60,9 @@ struct Args {
     #[clap(long, group = "exclusive", help = "Rollback to a specific epoch")]
     rollback_to_epoch: Option<EpochId>,
 
+    #[clap(long, requires = "rollback_to_epoch", help = "Output location of the rollback checkpoint file")]
+    rollback_checkpoint_dir: Option<PathBuf>,
+
     #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
     network_overrides_file: Option<PathBuf>,
     
@@ -86,6 +89,7 @@ fn main() {
 
     // Handle rollback if requested
     if let Some(epoch_id) = args.rollback_to_epoch {
+
         info!("Starting rollback to epoch {}", epoch_id);
         
         let network_overrides = if let Some(overrides_file) = args.network_overrides_file {
@@ -106,6 +110,7 @@ fn main() {
                 &config, 
                 epoch_id, 
                 network_overrides,
+                args.rollback_checkpoint_dir.unwrap(),
             )
                 .await
                 .expect("Rollback failed");

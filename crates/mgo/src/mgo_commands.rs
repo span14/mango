@@ -172,6 +172,10 @@ pub enum MgoCommand {
         /// Optional network address overrides file (JSON format)
         #[clap(long = "network-overrides")]
         network_overrides_file: Option<PathBuf>,
+
+        /// Optional network address overrides file (JSON format)
+        #[clap(long = "rollback-checkpoint-dir")]
+        rollback_checkpoint_dir: Option<PathBuf>,
     },
 }
 
@@ -342,6 +346,7 @@ impl MgoCommand {
                 config_path,
                 epoch_id,
                 network_overrides_file,
+                rollback_checkpoint_dir,
             } => {
                 info!("Starting rollback to epoch {}", epoch_id);
                 
@@ -359,7 +364,7 @@ impl MgoCommand {
                 };
                 
                 // Execute the rollback
-                mgo_node::MgoNode::rollback_by_epoch_async(&config, epoch_id, network_overrides).await?;
+                mgo_node::MgoNode::rollback_by_epoch_async(&config, epoch_id, network_overrides, rollback_checkpoint_dir.unwrap()).await?;
                 
                 info!("Rollback to epoch {} completed successfully", epoch_id);
                 Ok(())
