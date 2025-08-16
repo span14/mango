@@ -63,8 +63,8 @@ struct Args {
     #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
     network_overrides_file: Option<PathBuf>,
     
-    #[clap(long, help = "Flag to indicate the validator start after rollback")]
-    is_rollback_recovery: bool,
+    #[clap(long, help = "Path to rollback checkpoint file containing aggregated signatures")]
+    rollback_checkpoint_file: Option<PathBuf>,
 }
 
 fn main() {
@@ -178,7 +178,7 @@ fn main() {
             &config, 
             registry_service, 
             Some(rpc_runtime),
-            args.is_rollback_recovery,
+            args.rollback_checkpoint_file,
         ).await {
             Ok(mgo_node) => node_once_cell_clone
                 .set(mgo_node)

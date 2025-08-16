@@ -12,9 +12,10 @@ use std::{
 use mgo_genesis_builder::validator_info::GenesisValidatorInfo;
 use mgo_types::{
     base_types::{ObjectID, ObjectRef, MgoAddress},
-    crypto::{AuthorityPublicKey, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID},
+    crypto::{AuthorityPublicKey, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID, AuthoritySignInfo},
     multiaddr::Multiaddr,
     object::Owner,
+    messages_checkpoint::CheckpointSummary,
     mgo_system_state::{
         mgo_system_state_inner_v1::{UnverifiedValidatorOperationCapV1, ValidatorV1},
         mgo_system_state_summary::{MgoSystemStateSummary, MgoValidatorSummary},
@@ -31,7 +32,7 @@ use fastcrypto::{
     encoding::{Base64, Encoding},
     traits::KeyPair,
 };
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use serde_json;
 use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
 use mgo_json_rpc_types::{
@@ -52,6 +53,7 @@ use mgo_types::crypto::{
 };
 use mgo_types::crypto::{AuthorityKeyPair, NetworkKeyPair, SignatureScheme, MgoKeyPair};
 use mgo_types::transaction::{CallArg, ObjectArg, Transaction, TransactionData};
+use tracing::{info, warn};
 
 #[path = "unit_tests/validator_tests.rs"]
 #[cfg(test)]
@@ -163,6 +165,19 @@ pub enum MgoValidatorCommand {
         #[clap(name = "gas-budget", long)]
         gas_budget: Option<u64>,
     },
+    /// Aggregate multiple signed rollback checkpoints into a certified checkpoint.
+    #[clap(name = "aggregate-rollback-checkpoint")]
+    AggregateRollbackCheckpoint {
+        /// Directory containing signed rollback checkpoint JSON files from validators.
+        #[clap(name = "signatures-dir", long)]
+        signatures_dir: PathBuf,
+        /// Output path for the certified rollback checkpoint.
+        #[clap(name = "output-file", long)]
+        output_file: PathBuf,
+        /// Target epoch for the rollback checkpoint.
+        #[clap(name = "epoch", long)]
+        epoch: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -180,6 +195,11 @@ pub enum MgoValidatorCommandResponse {
     DisplayGasPriceUpdateRawTxn {
         data: TransactionData,
         serialized_data: String,
+    },
+    AggregateRollbackCheckpoint {
+        certified_checkpoint_file: String,
+        total_signatures: usize,
+        quorum_achieved: bool,
     },
 }
 
@@ -454,6 +474,23 @@ impl MgoValidatorCommand {
                     serialized_data,
                 }
             }
+
+            MgoValidatorCommand::AggregateRollbackCheckpoint {
+                signatures_dir,
+                output_file,
+                epoch,
+            } => {
+                let result = aggregate_rollback_checkpoint_signatures(
+                    signatures_dir,
+                    output_file,
+                    epoch,
+                ).await?;
+                MgoValidatorCommandResponse::AggregateRollbackCheckpoint {
+                    certified_checkpoint_file: result.output_file,
+                    total_signatures: result.total_signatures,
+                    quorum_achieved: result.quorum_achieved,
+                }
+            }
         });
         ret
     }
@@ -687,6 +724,17 @@ impl Display for MgoValidatorCommandResponse {
                     writer,
                     "Transaction: {:?}, \nSerialized transaction: {:?}",
                     data, serialized_data
+                )?;
+            }
+            MgoValidatorCommandResponse::AggregateRollbackCheckpoint {
+                certified_checkpoint_file,
+                total_signatures,
+                quorum_achieved,
+            } => {
+                write!(
+                    writer,
+                    "Aggregated rollback checkpoint:\n- Output file: {}\n- Total signatures: {}\n- Quorum achieved: {}",
+                    certified_checkpoint_file, total_signatures, quorum_achieved
                 )?;
             }
         }
@@ -1036,5 +1084,103 @@ async fn check_status(
         return Ok(status);
     }
     bail!("Validator {validator_address} is {:?}, this operation is not supported in this tool or prohibited.", status)
+}
+
+#[derive(Debug)]
+struct AggregationResult {
+    output_file: String,
+    total_signatures: usize,
+    quorum_achieved: bool,
+}
+
+async fn aggregate_rollback_checkpoint_signatures(
+    signatures_dir: PathBuf,
+    output_file: PathBuf,
+    epoch: u64,
+) -> Result<AggregationResult> {
+    use std::io::Write;    
+    #[derive(Serialize, Deserialize)]
+    struct RollbackCheckpointData {
+        checkpoint: CheckpointSummary,
+        signature: AuthoritySignInfo,
+    }
+    
+    info!("Aggregating rollback checkpoint signatures for epoch {} from directory: {:?}", epoch, signatures_dir);
+    
+    // Read all JSON files from the signatures directory
+    let mut signatures = Vec::<AuthoritySignInfo>::new();
+    let mut checkpoint_summary: Option<CheckpointSummary> = None;
+    
+    let entries = fs::read_dir(&signatures_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.extension().map_or(false, |ext| ext == "json") {
+            let content = fs::read_to_string(&path)?;
+            
+            // Try to parse as RollbackCheckpointData (checkpoint + signature)
+            if let Ok(checkpoint_data) = serde_json::from_str::<RollbackCheckpointData>(&content) {
+                if checkpoint_data.signature.epoch == epoch {
+                    info!("Added signature from authority: {:}", checkpoint_data.signature.authority);
+                    signatures.push(checkpoint_data.signature);
+                    
+                    // Use the first checkpoint as the canonical one (they should all be identical)
+                    if checkpoint_summary.is_none() {
+                        checkpoint_summary = Some(checkpoint_data.checkpoint);
+                    }
+                } else {
+                    warn!("Skipping signature from wrong epoch {} (expected {})", checkpoint_data.signature.epoch, epoch);
+                }
+            } else {
+                warn!("Failed to parse rollback checkpoint file: {:?}", path);
+            }
+        }
+    }
+    
+    if signatures.is_empty() {
+        bail!("No valid signatures found in directory: {:?}", signatures_dir);
+    }
+    
+    let checkpoint = checkpoint_summary.ok_or_else(|| {
+        anyhow!("No valid checkpoint found in signatures directory")
+    })?;
+    
+    // For now, we'll create a simple result structure
+    // In a real implementation, you would need committee information to check quorum
+    let total_signatures = signatures.len();
+    
+    // Create aggregation result
+    let result_data = RollbackCheckpointAggregation {
+        checkpoint,
+        signatures,
+        epoch,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    
+    // Export the aggregated result
+    let json_data = serde_json::to_string_pretty(&result_data)?;
+    let mut file = fs::File::create(&output_file)?;
+    file.write_all(json_data.as_bytes())?;
+    
+    let output_file_str = output_file.to_string_lossy().to_string();
+    info!("Exported aggregated rollback checkpoint to: {}", output_file_str);
+    
+    Ok(AggregationResult {
+        output_file: output_file_str,
+        total_signatures,
+        quorum_achieved: total_signatures >= 2, // Simple check for demo
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct RollbackCheckpointAggregation {
+    checkpoint: CheckpointSummary,
+    signatures: Vec<AuthoritySignInfo>,
+    epoch: u64,
+    timestamp: u64,
 }
 

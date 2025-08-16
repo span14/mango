@@ -8028,6 +8028,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shared-crypto",
  "snap",
  "tap",
  "telemetry-subscribers",

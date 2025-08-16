@@ -19,6 +19,14 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RollbackCheckpointAggregation {
+    checkpoint: CheckpointSummary,
+    signatures: Vec<AuthoritySignInfo>,
+    epoch: u64,
+    timestamp: u64,
+}
 #[cfg(msim)]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -110,8 +118,13 @@ use mgo_storage::{FileCompression, IndexStore, StorageFormat};
 use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress};
 use mgo_types::multiaddr::Multiaddr;
 use mgo_types::committee::Committee;
-use mgo_types::crypto::KeypairTraits;
+use mgo_types::crypto::{AuthoritySignInfo, AuthoritySignature, KeypairTraits, MgoAuthoritySignature};
 use mgo_types::error::{MgoError, MgoResult};
+use mgo_types::messages_checkpoint::{
+    CertifiedCheckpointSummary, CheckpointContents, CheckpointSummary, 
+    CheckpointSequenceNumber, CheckpointDigest, CheckpointTimestamp, VerifiedCheckpoint
+};
+use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
 use mgo_types::messages_consensus::{
     check_total_jwk_size, AuthorityCapabilities, ConsensusTransaction,
 };
@@ -247,8 +260,8 @@ pub struct MgoNode {
     // Channel to allow signaling upstream to shutdown mgo-node
     shutdown_channel_tx: broadcast::Sender<Option<RunWithRange>>,
 
-    // Rollback state restart
-    is_rollback_recovery: bool
+    // Rollback checkpoint file path for recovery
+    rollback_checkpoint_path: Option<PathBuf>
 }
 
 impl fmt::Debug for MgoNode {
@@ -266,9 +279,9 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
-        is_rollback_recovery: bool
+        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<Arc<MgoNode>> {
-        Self::start_async(config, registry_service, custom_rpc_runtime, is_rollback_recovery).await
+        Self::start_async(config, registry_service, custom_rpc_runtime, rollback_checkpoint_path).await
     }
 
     fn start_jwk_updater(
@@ -410,7 +423,7 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
-        is_rollback_recovery: bool
+        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<Arc<MgoNode>> {
         NodeConfigMetrics::new(&registry_service.default_registry()).record_metrics(config);
         let mut config = config.clone();
@@ -711,7 +724,7 @@ impl MgoNode {
                 connection_monitor_status.clone(),
                 &registry_service,
                 mgo_node_metrics.clone(),
-                is_rollback_recovery,
+                rollback_checkpoint_path.clone(),
             )
             .await?;
             // This is only needed during cold start.
@@ -750,7 +763,7 @@ impl MgoNode {
             _state_archive_handle: state_archive_handle,
             _state_snapshot_uploader_handle: state_snapshot_handle,
             shutdown_channel_tx: shutdown_channel,
-            is_rollback_recovery,
+            rollback_checkpoint_path,
         };
 
         info!("MgoNode started!");
@@ -759,6 +772,91 @@ impl MgoNode {
         spawn_monitored_task!(async move { Self::monitor_reconfiguration(node_copy).await });
 
         Ok(node)
+    }
+
+    // Helper functions for rollback checkpoint creation and signing
+    fn create_rollback_checkpoint(
+        epoch_id: EpochId, 
+        checkpoint_sequence: CheckpointSequenceNumber,
+        previous_digest: CheckpointDigest,
+        created_timestamp_ms: CheckpointTimestamp,
+    ) -> Result<CheckpointSummary> {
+        // Create an empty checkpoint contents for rollback
+        let checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
+            std::iter::empty(),
+            vec![],
+        );
+        
+        // Create checkpoint summary with minimal data for rollback
+        let checkpoint = CheckpointSummary::new(
+            epoch_id,
+            checkpoint_sequence, // sequence number 0 for rollback checkpoint
+            0, // no transactions
+            &checkpoint_contents,
+            Some(previous_digest), // no previous digest for rollback checkpoint
+            Default::default(), // empty gas cost summary
+            None, // no end of epoch data
+            created_timestamp_ms, // timestamp 0 for rollback checkpoint
+        );
+        
+        Ok(checkpoint)
+    }
+    
+    fn sign_rollback_checkpoint(
+        checkpoint: &CheckpointSummary,
+        config: &NodeConfig,
+    ) -> Result<AuthoritySignInfo> {
+        let authority_name = config.protocol_public_key();
+        let secret = config.protocol_key_pair();
+        
+        let intent_msg = IntentMessage::new(
+            Intent::mgo_app(IntentScope::CheckpointSummary),
+            checkpoint,
+        );
+        
+        let signature = AuthoritySignature::new_secure(
+            &intent_msg,
+            &checkpoint.epoch,
+            secret,
+        );
+        
+        Ok(AuthoritySignInfo {
+            epoch: checkpoint.epoch,
+            authority: authority_name,
+            signature,
+        })
+    }
+    
+    fn export_signed_checkpoint(
+        checkpoint: &CheckpointSummary,
+        signed_checkpoint: &AuthoritySignInfo,
+        db_path: &std::path::Path,
+        epoch_id: EpochId,
+    ) -> Result<()> {
+        use std::fs;
+        use std::io::Write;
+        #[derive(Serialize, Deserialize)]
+        struct RollbackCheckpointData {
+            checkpoint: CheckpointSummary,
+            signature: AuthoritySignInfo,
+        }
+        
+        let authority_hex = format!("{:}", signed_checkpoint.authority);
+        let filename = format!("rollback_checkpoint_epoch_{}_authority_{}.json", epoch_id, authority_hex);
+        let file_path = db_path.join(&filename);
+        
+        let data = RollbackCheckpointData {
+            checkpoint: checkpoint.clone(),
+            signature: signed_checkpoint.clone(),
+        };
+        
+        let json_data = serde_json::to_string_pretty(&data)?;
+        
+        let mut file = fs::File::create(&file_path)?;
+        file.write_all(json_data.as_bytes())?;
+        
+        info!("Exported rollback checkpoint and signature to: {:?}", file_path);
+        Ok(())
     }
 
     pub async fn rollback_by_epoch_async(
@@ -813,7 +911,6 @@ impl MgoNode {
 
         let mut epoch_start_configuration = perpetual_tables
             .get_epoch_start_configuration()?;
-
         // Apply network address overrides if provided during rollback
         let epoch_start_state = if let Some(ref overrides) = network_address_overrides {
             info!("Applying network address overrides for {} validators", overrides.len());
@@ -828,7 +925,19 @@ impl MgoNode {
             epoch_id,
         )?;
 
-        info!("Rollback to epoch {} completed. CheckpointBuilder will handle bootstrap checkpoint creation if needed.", epoch_id);
+        let latest_checkpoint = checkpoint_store.get_epoch_last_checkpoint(epoch_id-1)?.unwrap().into_inner();
+
+        // Create and sign rollback checkpoint
+        let rollback_checkpoint = Self::create_rollback_checkpoint(
+            epoch_id,
+            latest_checkpoint.sequence_number() + 1,
+            latest_checkpoint.digest().clone(),
+            epoch_start_state.epoch_start_timestamp_ms(),
+        )?;
+        let signed_checkpoint = Self::sign_rollback_checkpoint(&rollback_checkpoint, &config)?;
+        Self::export_signed_checkpoint(&rollback_checkpoint, &signed_checkpoint, &config.db_path(), epoch_id)?;
+        
+        info!("Created and exported signed rollback checkpoint for epoch {}", epoch_id);
 
         Ok(())
 
@@ -1114,7 +1223,7 @@ impl MgoNode {
         connection_monitor_status: Arc<ConnectionMonitorStatus>,
         registry_service: &RegistryService,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
-        is_rollback_recovery: bool
+        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<ValidatorComponents> {
         let consensus_config = config
             .consensus_config()
@@ -1191,7 +1300,7 @@ impl MgoNode {
             checkpoint_metrics,
             mgo_node_metrics,
             mgo_tx_validator_metrics,
-            is_rollback_recovery
+            rollback_checkpoint_path
         )
         .await
     }
@@ -1210,8 +1319,49 @@ impl MgoNode {
         checkpoint_metrics: Arc<CheckpointMetrics>,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
         mgo_tx_validator_metrics: Arc<MgoTxValidatorMetrics>,
-        is_rollback_recovery: bool
+        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<ValidatorComponents> {
+        // If we have a rollback checkpoint file, load and process it before starting checkpoint service
+        if let Some(ref checkpoint_path) = rollback_checkpoint_path {
+            info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
+            
+            // Load the aggregated checkpoint data
+            let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
+            let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
+            
+            info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
+                  aggregated.signatures.len(), aggregated.epoch);
+            
+            // Create a certified checkpoint from the aggregated data
+            // This is similar to how genesis processes the initial checkpoint
+            let committee = epoch_store.committee();
+            
+            // Create the certified checkpoint with aggregated signatures
+            let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
+                aggregated.signatures,
+                committee,
+            )?;
+            
+            let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
+                aggregated.checkpoint,
+                quorum_signature,
+            );
+            
+            // Convert to VerifiedCheckpoint and insert into store
+            let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
+            
+            // Insert the checkpoint directly into the store
+            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+            
+            // Update the watermarks to mark this checkpoint as synced
+            // This is critical for the node to recognize the rollback checkpoint as the starting point
+            checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
+            checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
+            
+            info!("Stored rollback checkpoint {} in checkpoint store and updated watermarks", 
+                  verified_checkpoint.sequence_number());
+        }
+        
         let (checkpoint_service, checkpoint_service_exit) = Self::start_checkpoint_service(
             config,
             consensus_adapter.clone(),
@@ -1266,13 +1416,6 @@ impl MgoNode {
                 ),
             )
             .await;
-        
-        if is_rollback_recovery {
-            info!("Rollback recovery mode: creating bootstrap checkpoint");
-            checkpoint_service
-                .create_bootstrap_checkpoint_for_rollback(&epoch_store)
-                .await?;
-        }
         
         if epoch_store.authenticator_state_enabled() {
             Self::start_jwk_updater(
@@ -1625,7 +1768,7 @@ impl MgoNode {
                             checkpoint_metrics,
                             self.metrics.clone(),
                             mgo_tx_validator_metrics,
-                            self.is_rollback_recovery,
+                            self.rollback_checkpoint_path.clone(),
                         )
                         .await?,
                     )
@@ -1659,7 +1802,7 @@ impl MgoNode {
                             self.connection_monitor_status.clone(),
                             &self.registry_service,
                             self.metrics.clone(),
-                            self.is_rollback_recovery,
+                            self.rollback_checkpoint_path.clone(),
                         )
                         .await?,
                     )
