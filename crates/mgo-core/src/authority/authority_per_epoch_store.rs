@@ -853,7 +853,7 @@ impl AuthorityPerEpochStore {
                 epochs_to_remove.push((epoch, epoch_path));
             } else {
                 // Assume epochs are contiguous, so stop when we find a gap
-                break;
+                continue;
             }
         }
         

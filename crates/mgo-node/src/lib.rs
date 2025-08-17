@@ -7,6 +7,7 @@ use anemo_tower::trace::DefaultMakeSpan;
 use anemo_tower::trace::DefaultOnFailure;
 use anemo_tower::trace::TraceLayer;
 use anyhow::anyhow;
+use anyhow::Error;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use fastcrypto_zkp::bn254::zk_login::JwkId;
@@ -132,7 +133,7 @@ use mgo_types::quorum_driver_types::QuorumDriverEffectsQueueResult;
 use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemState;
 use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemStateTrait;
 use mgo_types::mgo_system_state::MgoSystemStateTrait;
-use typed_store::rocks::default_db_options;
+use typed_store::rocks::{default_db_options, safe_drop_db};
 use typed_store::DBMetrics;
 
 use crate::metrics::{GrpcMetrics, MgoNodeMetrics};
@@ -977,6 +978,33 @@ impl MgoNode {
             &config.db_path().join("store"),
             epoch_id,
         )?;
+
+        // If the node is validator
+        if config.consensus_config().is_some() {
+            let base_consensus_path = config.consensus_config().unwrap().db_path();
+            let mut epochs_to_remove = vec![];
+            for epoch in epoch_id..(epoch_id + 1000) {
+                epochs_to_remove.push((epoch, base_consensus_path.join(format!("{}", epoch))));
+            }
+
+            // Now destroy each database in consensus database
+            for (epoch, path) in epochs_to_remove {
+                info!("Destroying ConsensusDB for epoch {} at path {:?}", epoch, path);
+                match safe_drop_db(path) {
+                    Ok(()) => info!("Successfully destroyed database for epoch {}", epoch),
+                    Err(e) => {
+                        error!("Failed to destroy database for epoch {}: {}", epoch, e);
+                        return Err(Error::msg(format!(
+                            "Failed to destroy epoch {} database: {}",
+                            epoch, e
+                        )));
+                    }
+                }
+            }
+
+        }
+
+
 
         let latest_checkpoint = checkpoint_store.get_epoch_last_checkpoint(epoch_id-1)?.unwrap().into_inner();
 
