@@ -1895,6 +1895,8 @@ pub trait TransactionDataAPI {
     /// Check if the transaction is sponsored (namely gas owner != sender)
     fn is_sponsored_tx(&self) -> bool;
 
+    fn is_rollback_tx(&self) -> bool;
+
     fn sender_mut_for_testing(&mut self) -> &mut MgoAddress;
 
     fn gas_data_mut(&mut self) -> &mut GasData;
@@ -2031,6 +2033,10 @@ impl TransactionDataAPI for TransactionDataV1 {
 
     fn is_genesis_tx(&self) -> bool {
         matches!(self.kind, TransactionKind::Genesis(_))
+    }
+
+    fn is_rollback_tx(&self) -> bool {
+        matches!(self.kind, TransactionKind::RollbackPrologue(_))
     }
 
     fn sender_mut_for_testing(&mut self) -> &mut MgoAddress {

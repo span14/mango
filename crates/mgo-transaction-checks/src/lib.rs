@@ -368,7 +368,7 @@ mod checked {
             }
         }
 
-        if !transaction.is_genesis_tx() && objects.is_empty() {
+        if !transaction.is_genesis_tx() && !transaction.is_rollback_tx() && objects.is_empty() {
             return Err(UserInputError::ObjectInputArityViolation);
         }
 
