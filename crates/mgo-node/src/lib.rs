@@ -260,8 +260,6 @@ pub struct MgoNode {
     // Channel to allow signaling upstream to shutdown mgo-node
     shutdown_channel_tx: broadcast::Sender<Option<RunWithRange>>,
 
-    // Rollback checkpoint file path for recovery
-    rollback_checkpoint_path: Option<PathBuf>
 }
 
 impl fmt::Debug for MgoNode {
@@ -538,6 +536,51 @@ impl MgoNode {
             genesis.checkpoint_contents().clone(),
             &epoch_store,
         );
+        // If we have a rollback checkpoint file, load and process it before starting checkpoint service
+        if let Some(ref checkpoint_path) = rollback_checkpoint_path {
+            info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
+            
+            // Load the aggregated checkpoint data
+            let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
+            let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
+            
+            info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
+                  aggregated.signatures.len(), aggregated.epoch);
+            
+            // Create a certified checkpoint from the aggregated data
+            // This is similar to how genesis processes the initial checkpoint
+            let committee = epoch_store.committee();
+            
+            // Create the certified checkpoint with aggregated signatures
+            let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
+                aggregated.signatures,
+                committee,
+            )?;
+            
+            let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
+                aggregated.checkpoint,
+                quorum_signature,
+            );
+            
+            // Convert to VerifiedCheckpoint and insert into store
+            let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
+            
+            // Insert the checkpoint directly into the store
+            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+            let empty_checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
+                std::iter::empty(),
+                vec![],
+            );
+            checkpoint_store.insert_checkpoint_contents(empty_checkpoint_contents)?;
+            
+            // Update the watermarks to mark this checkpoint as synced
+            // This is critical for the node to recognize the rollback checkpoint as the starting point
+            checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
+            checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
+            
+            info!("Stored rollback checkpoint {} in checkpoint store and updated watermarks", 
+                  verified_checkpoint.sequence_number());
+        }
 
         let state_sync_store = RocksDbStore::new(
             store.clone(),
@@ -724,7 +767,6 @@ impl MgoNode {
                 connection_monitor_status.clone(),
                 &registry_service,
                 mgo_node_metrics.clone(),
-                rollback_checkpoint_path.clone(),
             )
             .await?;
             // This is only needed during cold start.
@@ -763,7 +805,6 @@ impl MgoNode {
             _state_archive_handle: state_archive_handle,
             _state_snapshot_uploader_handle: state_snapshot_handle,
             shutdown_channel_tx: shutdown_channel,
-            rollback_checkpoint_path,
         };
 
         info!("MgoNode started!");
@@ -1224,7 +1265,6 @@ impl MgoNode {
         connection_monitor_status: Arc<ConnectionMonitorStatus>,
         registry_service: &RegistryService,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
-        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<ValidatorComponents> {
         let consensus_config = config
             .consensus_config()
@@ -1301,7 +1341,6 @@ impl MgoNode {
             checkpoint_metrics,
             mgo_node_metrics,
             mgo_tx_validator_metrics,
-            rollback_checkpoint_path
         )
         .await
     }
@@ -1320,53 +1359,7 @@ impl MgoNode {
         checkpoint_metrics: Arc<CheckpointMetrics>,
         mgo_node_metrics: Arc<MgoNodeMetrics>,
         mgo_tx_validator_metrics: Arc<MgoTxValidatorMetrics>,
-        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<ValidatorComponents> {
-        // If we have a rollback checkpoint file, load and process it before starting checkpoint service
-        if let Some(ref checkpoint_path) = rollback_checkpoint_path {
-            info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
-            
-            // Load the aggregated checkpoint data
-            let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
-            let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
-            
-            info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
-                  aggregated.signatures.len(), aggregated.epoch);
-            
-            // Create a certified checkpoint from the aggregated data
-            // This is similar to how genesis processes the initial checkpoint
-            let committee = epoch_store.committee();
-            
-            // Create the certified checkpoint with aggregated signatures
-            let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
-                aggregated.signatures,
-                committee,
-            )?;
-            
-            let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
-                aggregated.checkpoint,
-                quorum_signature,
-            );
-            
-            // Convert to VerifiedCheckpoint and insert into store
-            let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
-            
-            // Insert the checkpoint directly into the store
-            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
-            let empty_checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
-                std::iter::empty(),
-                vec![],
-            );
-            checkpoint_store.insert_checkpoint_contents(empty_checkpoint_contents)?;
-            
-            // Update the watermarks to mark this checkpoint as synced
-            // This is critical for the node to recognize the rollback checkpoint as the starting point
-            checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
-            checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
-            
-            info!("Stored rollback checkpoint {} in checkpoint store and updated watermarks", 
-                  verified_checkpoint.sequence_number());
-        }
         
         let (checkpoint_service, checkpoint_service_exit) = Self::start_checkpoint_service(
             config,
@@ -1774,7 +1767,6 @@ impl MgoNode {
                             checkpoint_metrics,
                             self.metrics.clone(),
                             mgo_tx_validator_metrics,
-                            self.rollback_checkpoint_path.clone(),
                         )
                         .await?,
                     )
@@ -1808,7 +1800,6 @@ impl MgoNode {
                             self.connection_monitor_status.clone(),
                             &self.registry_service,
                             self.metrics.clone(),
-                            self.rollback_checkpoint_path.clone(),
                         )
                         .await?,
                     )
