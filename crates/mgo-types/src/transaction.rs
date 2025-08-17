@@ -16,8 +16,8 @@ use crate::execution::SharedInput;
 use crate::message_envelope::{
     AuthenticatedMessage, Envelope, Message, TrustedEnvelope, VerifiedEnvelope,
 };
-use crate::messages_checkpoint::CheckpointTimestamp;
-use crate::messages_consensus::{ConsensusCommitPrologue, ConsensusCommitPrologueV2};
+use crate::messages_checkpoint::{CheckpointSequenceNumber, CheckpointTimestamp};
+use crate::messages_consensus::{ConsensusCommitPrologue, ConsensusCommitPrologueV2, RollbackPrologue};
 use crate::object::{MoveObject, Object, Owner};
 use crate::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use crate::signature::{AuthenticatorTrait, GenericSignature, VerifyParams};
@@ -283,6 +283,8 @@ pub enum TransactionKind {
     RandomnessStateUpdate(RandomnessStateUpdate),
     // V2 ConsensusCommitPrologue also includes the digest of the current consensus output.
     ConsensusCommitPrologueV2(ConsensusCommitPrologueV2),
+    // Rollback prologue transaction for epoch rollback operations
+    RollbackPrologue(RollbackPrologue),
     // .. more transaction types go here
 }
 
@@ -404,7 +406,8 @@ impl VersionedProtocolMessage for TransactionKind {
         match &self {
             TransactionKind::ChangeEpoch(_)
             | TransactionKind::Genesis(_)
-            | TransactionKind::ConsensusCommitPrologue(_) => Ok(()),
+            | TransactionKind::ConsensusCommitPrologue(_)
+            | TransactionKind::RollbackPrologue(_) => Ok(()),
             TransactionKind::ProgrammableTransaction(pt) => {
                 // NB: we don't use the `receiving_objects` method here since we don't want to check
                 // for any validity requirements such as duplicate receiving inputs at this point.
@@ -1122,7 +1125,8 @@ impl TransactionKind {
             | TransactionKind::ConsensusCommitPrologueV2(_)
             | TransactionKind::AuthenticatorStateUpdate(_)
             | TransactionKind::RandomnessStateUpdate(_)
-            | TransactionKind::EndOfEpochTransaction(_) => true,
+            | TransactionKind::EndOfEpochTransaction(_)
+            | TransactionKind::RollbackPrologue(_) => true,
             TransactionKind::ProgrammableTransaction(_) => false,
         }
     }
@@ -1194,6 +1198,7 @@ impl TransactionKind {
             Self::ProgrammableTransaction(pt) => {
                 Either::Right(Either::Left(pt.shared_input_objects()))
             }
+            Self::RollbackPrologue(_) => Either::Right(Either::Right(iter::empty())),
             _ => Either::Right(Either::Right(iter::empty())),
         }
     }
@@ -1213,7 +1218,8 @@ impl TransactionKind {
             | TransactionKind::ConsensusCommitPrologueV2(_)
             | TransactionKind::AuthenticatorStateUpdate(_)
             | TransactionKind::RandomnessStateUpdate(_)
-            | TransactionKind::EndOfEpochTransaction(_) => vec![],
+            | TransactionKind::EndOfEpochTransaction(_)
+            | TransactionKind::RollbackPrologue(_) => vec![],
             TransactionKind::ProgrammableTransaction(pt) => pt.receiving_objects(),
         }
     }
@@ -1258,6 +1264,9 @@ impl TransactionKind {
             Self::EndOfEpochTransaction(txns) => {
                 txns.iter().flat_map(|txn| txn.input_objects()).collect()
             }
+            Self::RollbackPrologue(_) => {
+                vec![]
+            }
             Self::ProgrammableTransaction(p) => return p.input_objects(),
         };
         // Ensure that there are no duplicate inputs. This cannot be removed because:
@@ -1282,7 +1291,8 @@ impl TransactionKind {
             TransactionKind::ChangeEpoch(_)
             | TransactionKind::Genesis(_)
             | TransactionKind::ConsensusCommitPrologue(_)
-            | TransactionKind::ConsensusCommitPrologueV2(_) => (),
+            | TransactionKind::ConsensusCommitPrologueV2(_)
+            | TransactionKind::RollbackPrologue(_) => (),
             TransactionKind::EndOfEpochTransaction(txns) => {
                 // The transaction should have been rejected earlier if the feature is not enabled.
                 assert!(config.end_of_epoch_transaction_supported());
@@ -1337,6 +1347,7 @@ impl TransactionKind {
             Self::AuthenticatorStateUpdate(_) => "AuthenticatorStateUpdate",
             Self::RandomnessStateUpdate(_) => "RandomnessStateUpdate",
             Self::EndOfEpochTransaction(_) => "EndOfEpochTransaction",
+            Self::RollbackPrologue(_) => "RollbackPrologue",
         }
     }
 }
@@ -1377,6 +1388,12 @@ impl Display for TransactionKind {
             }
             Self::EndOfEpochTransaction(_) => {
                 writeln!(writer, "Transaction Kind : End of Epoch Transaction")?;
+            }
+            Self::RollbackPrologue(p) => {
+                writeln!(writer, "Transaction Kind : Rollback Prologue")?;
+                writeln!(writer, "Epoch : {}", p.epoch)?;
+                writeln!(writer, "Checkpoint Sequence : {}", p.checkpoint_sequence_number)?;
+                writeln!(writer, "Timestamp : {}", p.timestamp_ms)?;
             }
         }
         write!(f, "{}", writer)
@@ -2478,6 +2495,20 @@ impl VerifiedTransaction {
             consensus_commit_digest,
         }
         .pipe(TransactionKind::ConsensusCommitPrologueV2)
+        .pipe(Self::new_system_transaction)
+    }
+
+    pub fn new_rollback_prologue(
+        epoch: u64,
+        checkpoint_sequence_number: CheckpointSequenceNumber,
+        timestamp_ms: CheckpointTimestamp,
+    ) -> Self {
+        RollbackPrologue {
+            epoch,
+            checkpoint_sequence_number,
+            timestamp_ms,
+        }
+        .pipe(TransactionKind::RollbackPrologue)
         .pipe(Self::new_system_transaction)
     }
 

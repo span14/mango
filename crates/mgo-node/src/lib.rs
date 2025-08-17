@@ -569,6 +569,7 @@ impl MgoNode {
 
             let contents = Self::create_rollback_checkpoint_contents(
                 epoch_store.epoch(),
+                aggregated.checkpoint.sequence_number,
                 epoch_store.epoch_start_state().epoch_start_timestamp_ms(),
             );
             
@@ -713,18 +714,20 @@ impl MgoNode {
         }
 
         if let Some(_) = rollback_checkpoint_path {
-            
-            let prologue_tx = VerifiedTransaction::new_consensus_commit_prologue(
+            let sequence_number = *aggregated_checkpoint.unwrap().sequence_number();
+            let rollback_tx = VerifiedTransaction::new_rollback_prologue(
                 epoch_store.epoch(),
-                0, // round 0 for rollback
+                sequence_number,
                 epoch_store.epoch_start_state().epoch_start_timestamp_ms(),
             );
-            let span = error_span!("rollback_txn", tx_digest = ?prologue_tx.digest());
+            let span = error_span!("rollback_txn", tx_digest = ?rollback_tx.digest());
+            
+            // No need for shared lock setup since RollbackPrologue doesn't use shared objects
             let transaction =
                 VerifiedExecutableTransaction::new_unchecked(
                     ExecutableTransaction::new_from_data_and_sig(
-                        prologue_tx.data().clone(),
-                        CertificateProof::Checkpoint(epoch_store.epoch(), *aggregated_checkpoint.unwrap().sequence_number()),
+                        rollback_tx.data().clone(),
+                        CertificateProof::Checkpoint(epoch_store.epoch(), sequence_number),
                     ),
                 );
             state
@@ -858,24 +861,25 @@ impl MgoNode {
 
     fn create_rollback_checkpoint_contents(
         epoch_id: EpochId, 
+        checkpoint_sequence_number: CheckpointSequenceNumber,
         created_timestamp_ms: CheckpointTimestamp,
     ) -> CheckpointContents {
-        // Create a ConsensusCommitPrologue transaction to bootstrap consensus
-        let prologue_tx = VerifiedTransaction::new_consensus_commit_prologue(
+        // Create a RollbackPrologue transaction to mark rollback initialization
+        let rollback_tx = VerifiedTransaction::new_rollback_prologue(
             epoch_id,
-            0, // round 0 for rollback
+            checkpoint_sequence_number,
             created_timestamp_ms,
         );
         
-        // Create effects for the prologue transaction
+        // Create effects for the rollback transaction
         // Using a minimal effects object for the system transaction
-        let effects = TransactionEffects::new_with_tx(&prologue_tx);
+        let effects = TransactionEffects::new_with_tx(&rollback_tx);
         let execution_digests = ExecutionDigests::new(
-            *prologue_tx.digest(),
+            *rollback_tx.digest(),
             effects.digest(),
         );
 
-        // Create checkpoint contents with the prologue transaction
+        // Create checkpoint contents with the rollback transaction
         let checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
             vec![execution_digests],
             vec![vec![]], // System transactions have empty signatures
@@ -892,13 +896,13 @@ impl MgoNode {
         created_timestamp_ms: CheckpointTimestamp,
     ) -> CheckpointSummary {
         
-        let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, created_timestamp_ms);
+        let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence, created_timestamp_ms);
 
-        // Create checkpoint summary with the prologue transaction
+        // Create checkpoint summary with the rollback transaction
         let checkpoint = CheckpointSummary::new(
             epoch_id,
             checkpoint_sequence,
-            1, // 1 transaction (the prologue)
+            1, // 1 transaction (the rollback prologue)
             &checkpoint_contents,
             Some(previous_digest),
             Default::default(), // empty gas cost summary

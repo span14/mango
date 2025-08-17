@@ -1436,7 +1436,7 @@ impl AuthorityPerEpochStore {
         Ok(ret)
     }
 
-    async fn set_assigned_shared_object_versions(
+    pub async fn set_assigned_shared_object_versions(
         &self,
         certificate: &VerifiedExecutableTransaction,
         assigned_versions: &Vec<(ObjectID, SequenceNumber)>,

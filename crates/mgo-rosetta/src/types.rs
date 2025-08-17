@@ -415,6 +415,7 @@ pub enum OperationType {
     AuthenticatorStateUpdate,
     RandomnessStateUpdate,
     EndOfEpochTransaction,
+    RollbackPrologue,
 }
 
 impl From<&MgoTransactionBlockKind> for OperationType {
@@ -437,6 +438,9 @@ impl From<&MgoTransactionBlockKind> for OperationType {
             }
             MgoTransactionBlockKind::EndOfEpochTransaction(_) => {
                 OperationType::EndOfEpochTransaction
+            }
+            MgoTransactionBlockKind::RollbackPrologue(_) => {
+                OperationType::RollbackPrologue
             }
         }
     }

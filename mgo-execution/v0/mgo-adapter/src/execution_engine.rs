@@ -474,6 +474,9 @@ mod checked {
             TransactionKind::EndOfEpochTransaction(_) => {
                 panic!("EndOfEpochTransaction should not exist in execution layer v0");
             }
+            TransactionKind::RollbackPrologue(_) => {
+                panic!("RollbackPrologue should not exist in execution layer v0");
+            }
         }
     }
 

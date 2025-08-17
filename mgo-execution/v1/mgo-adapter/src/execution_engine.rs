@@ -627,6 +627,9 @@ mod checked {
             TransactionKind::RandomnessStateUpdate(_) => {
                 panic!("RandomnessStateUpdate should not exist in v1");
             }
+            TransactionKind::RollbackPrologue(_) => {
+                panic!("RollbackPrologue should not exist in v1");
+            }
         }?;
         temporary_store.check_execution_results_consistency()?;
         Ok(result)

@@ -43,6 +43,18 @@ pub struct ConsensusCommitPrologueV2 {
     pub consensus_commit_digest: ConsensusCommitDigest,
 }
 
+/// A transaction to mark the beginning of a rollback operation.
+/// Unlike ConsensusCommitPrologue, this doesn't require shared object access.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct RollbackPrologue {
+    /// Epoch being rolled back to
+    pub epoch: u64,
+    /// Checkpoint sequence number for this rollback
+    pub checkpoint_sequence_number: CheckpointSequenceNumber,
+    /// Unix timestamp for the rollback
+    pub timestamp_ms: CheckpointTimestamp,
+}
+
 // In practice, JWKs are about 500 bytes of json each, plus a bit more for the ID.
 // 4096 should give us plenty of space for any imaginable JWK while preventing DoSes.
 static MAX_TOTAL_JWK_SIZE: usize = 4096;

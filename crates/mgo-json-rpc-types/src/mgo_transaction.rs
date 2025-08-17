@@ -398,6 +398,8 @@ pub enum MgoTransactionBlockKind {
     EndOfEpochTransaction(MgoEndOfEpochTransaction),
     ConsensusCommitPrologueV2(MgoConsensusCommitPrologueV2),
     // .. more transaction types go here
+    RollbackPrologue(MgoRollbackPrologue),
+
 }
 
 impl Display for MgoTransactionBlockKind {
@@ -443,6 +445,14 @@ impl Display for MgoTransactionBlockKind {
             }
             Self::EndOfEpochTransaction(_) => {
                 writeln!(writer, "Transaction Kind: End of Epoch Transaction")?;
+            }
+            Self::RollbackPrologue(p) => {
+                writeln!(writer, "Transaction Kind: Rollback Prologue")?;
+                writeln!(
+                    writer,
+                    "Epoch: {}, Checkpoint Sequence Number: {}, Timestamp: {}",
+                    p.epoch, p.checkpoint_sequence_number, p.timestamp_ms,
+                )?;
             }
         }
         write!(f, "{}", writer)
@@ -520,6 +530,13 @@ impl MgoTransactionBlockKind {
                         .collect(),
                 })
             }
+            TransactionKind::RollbackPrologue(rollback_prologue) => {
+                Self::RollbackPrologue(MgoRollbackPrologue {
+                    epoch: rollback_prologue.epoch,
+                    checkpoint_sequence_number: rollback_prologue.checkpoint_sequence_number,
+                    timestamp_ms: rollback_prologue.timestamp_ms,
+                })
+            }
         })
     }
 
@@ -540,6 +557,7 @@ impl MgoTransactionBlockKind {
             Self::AuthenticatorStateUpdate(_) => "AuthenticatorStateUpdate",
             Self::RandomnessStateUpdate(_) => "RandomnessStateUpdate",
             Self::EndOfEpochTransaction(_) => "EndOfEpochTransaction",
+            Self::RollbackPrologue(_) => "RollbackPrologue",
         }
     }
 }
@@ -1462,6 +1480,23 @@ pub struct MgoAuthenticatorStateExpire {
     #[schemars(with = "BigInt<u64>")]
     #[serde_as(as = "BigInt<u64>")]
     pub min_epoch: u64,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MgoRollbackPrologue {
+    #[schemars(with = "BigInt<u64>")]
+    #[serde_as(as = "BigInt<u64>")]
+    pub epoch: u64,
+
+    #[schemars(with = "BigInt<u64>")]
+    #[serde_as(as = "BigInt<u64>")]
+    pub checkpoint_sequence_number: u64,
+
+    #[schemars(with = "BigInt<u64>")]
+    #[serde_as(as = "BigInt<u64>")]
+    pub timestamp_ms: u64,
+
 }
 
 #[serde_as]

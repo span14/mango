@@ -657,6 +657,11 @@ mod checked {
                 )?;
                 Ok(Mode::empty_results())
             }
+            TransactionKind::RollbackPrologue(_rollback_prologue) => {
+                // RollbackPrologue is a marker transaction for rollback initialization.
+                // It doesn't perform any state changes, just records the rollback event.
+                Ok(Mode::empty_results())
+            }
         }?;
         temporary_store.check_execution_results_consistency()?;
         Ok(result)

@@ -5,6 +5,7 @@ use self::{
     consensus_commit_prologue::ConsensusCommitPrologueTransaction,
     end_of_epoch::ChangeEpochTransaction, genesis::GenesisTransaction,
     randomness_state_update::RandomnessStateUpdateTransaction,
+    rollback_prologue::RollbackPrologueTransaction,
 };
 use crate::types::transaction_block_kind::{
     authenticator_state_update::AuthenticatorStateUpdateTransaction,
@@ -19,6 +20,7 @@ pub(crate) mod end_of_epoch;
 pub(crate) mod genesis;
 pub(crate) mod programmable;
 pub(crate) mod randomness_state_update;
+pub(crate) mod rollback_prologue;
 
 /// The kind of transaction block, either a programmable transaction or a system transaction.
 #[derive(Union, PartialEq, Clone, Eq)]
@@ -30,6 +32,7 @@ pub(crate) enum TransactionBlockKind {
     AuthenticatorState(AuthenticatorStateUpdateTransaction),
     Randomness(RandomnessStateUpdateTransaction),
     EndOfEpoch(EndOfEpochTransaction),
+    RollbackPrologue(RollbackPrologueTransaction),
 }
 
 impl TransactionBlockKind {
@@ -68,6 +71,12 @@ impl TransactionBlockKind {
             }),
             K::RandomnessStateUpdate(rsu) => T::Randomness(RandomnessStateUpdateTransaction {
                 native: rsu,
+                checkpoint_viewed_at,
+            }),
+            K::RollbackPrologue(rp) => T::RollbackPrologue(RollbackPrologueTransaction {
+                epoch: rp.epoch,
+                checkpoint_sequence_number: rp.checkpoint_sequence_number,
+                timestamp_ms: rp.timestamp_ms,
                 checkpoint_viewed_at,
             }),
         }
