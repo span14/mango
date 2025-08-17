@@ -570,7 +570,6 @@ impl MgoNode {
             let contents = Self::create_rollback_checkpoint_contents(
                 epoch_store.epoch(),
                 aggregated.checkpoint.sequence_number,
-                epoch_store.epoch_start_state().epoch_start_timestamp_ms(),
             );
             
             // Convert to VerifiedCheckpoint and insert into store
@@ -718,7 +717,6 @@ impl MgoNode {
             let rollback_tx = VerifiedTransaction::new_rollback_prologue(
                 epoch_store.epoch(),
                 sequence_number,
-                epoch_store.epoch_start_state().epoch_start_timestamp_ms(),
             );
             let span = error_span!("rollback_txn", tx_digest = ?rollback_tx.digest());
             
@@ -862,13 +860,11 @@ impl MgoNode {
     fn create_rollback_checkpoint_contents(
         epoch_id: EpochId, 
         checkpoint_sequence_number: CheckpointSequenceNumber,
-        created_timestamp_ms: CheckpointTimestamp,
     ) -> CheckpointContents {
         // Create a RollbackPrologue transaction to mark rollback initialization
         let rollback_tx = VerifiedTransaction::new_rollback_prologue(
             epoch_id,
             checkpoint_sequence_number,
-            created_timestamp_ms,
         );
         
         // Create effects for the rollback transaction
@@ -896,7 +892,7 @@ impl MgoNode {
         created_timestamp_ms: CheckpointTimestamp,
     ) -> CheckpointSummary {
         
-        let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence, created_timestamp_ms);
+        let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence);
 
         // Create checkpoint summary with the rollback transaction
         let checkpoint = CheckpointSummary::new(

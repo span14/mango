@@ -51,8 +51,6 @@ pub struct RollbackPrologue {
     pub epoch: u64,
     /// Checkpoint sequence number for this rollback
     pub checkpoint_sequence_number: CheckpointSequenceNumber,
-    /// Unix timestamp for the rollback
-    pub timestamp_ms: CheckpointTimestamp,
 }
 
 // In practice, JWKs are about 500 bytes of json each, plus a bit more for the ID.

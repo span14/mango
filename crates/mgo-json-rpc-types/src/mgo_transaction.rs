@@ -450,8 +450,8 @@ impl Display for MgoTransactionBlockKind {
                 writeln!(writer, "Transaction Kind: Rollback Prologue")?;
                 writeln!(
                     writer,
-                    "Epoch: {}, Checkpoint Sequence Number: {}, Timestamp: {}",
-                    p.epoch, p.checkpoint_sequence_number, p.timestamp_ms,
+                    "Epoch: {}, Checkpoint Sequence Number: {}",
+                    p.epoch, p.checkpoint_sequence_number,
                 )?;
             }
         }
@@ -534,7 +534,6 @@ impl MgoTransactionBlockKind {
                 Self::RollbackPrologue(MgoRollbackPrologue {
                     epoch: rollback_prologue.epoch,
                     checkpoint_sequence_number: rollback_prologue.checkpoint_sequence_number,
-                    timestamp_ms: rollback_prologue.timestamp_ms,
                 })
             }
         })
@@ -1492,10 +1491,6 @@ pub struct MgoRollbackPrologue {
     #[schemars(with = "BigInt<u64>")]
     #[serde_as(as = "BigInt<u64>")]
     pub checkpoint_sequence_number: u64,
-
-    #[schemars(with = "BigInt<u64>")]
-    #[serde_as(as = "BigInt<u64>")]
-    pub timestamp_ms: u64,
 
 }
 

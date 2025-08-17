@@ -76,7 +76,6 @@ impl TransactionBlockKind {
             K::RollbackPrologue(rp) => T::RollbackPrologue(RollbackPrologueTransaction {
                 epoch: rp.epoch,
                 checkpoint_sequence_number: rp.checkpoint_sequence_number,
-                timestamp_ms: rp.timestamp_ms,
                 checkpoint_viewed_at,
             }),
         }

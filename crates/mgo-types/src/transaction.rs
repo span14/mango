@@ -1393,7 +1393,6 @@ impl Display for TransactionKind {
                 writeln!(writer, "Transaction Kind : Rollback Prologue")?;
                 writeln!(writer, "Epoch : {}", p.epoch)?;
                 writeln!(writer, "Checkpoint Sequence : {}", p.checkpoint_sequence_number)?;
-                writeln!(writer, "Timestamp : {}", p.timestamp_ms)?;
             }
         }
         write!(f, "{}", writer)
@@ -2507,12 +2506,10 @@ impl VerifiedTransaction {
     pub fn new_rollback_prologue(
         epoch: u64,
         checkpoint_sequence_number: CheckpointSequenceNumber,
-        timestamp_ms: CheckpointTimestamp,
     ) -> Self {
         RollbackPrologue {
             epoch,
             checkpoint_sequence_number,
-            timestamp_ms,
         }
         .pipe(TransactionKind::RollbackPrologue)
         .pipe(Self::new_system_transaction)

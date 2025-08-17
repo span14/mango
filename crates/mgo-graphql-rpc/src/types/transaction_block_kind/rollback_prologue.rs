@@ -2,7 +2,7 @@
 // Copyright (c) MangoNet Labs Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::{date_time::DateTime, epoch::Epoch};
+use crate::types::epoch::Epoch;
 use async_graphql::*;
 use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 
@@ -10,7 +10,6 @@ use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 pub(crate) struct RollbackPrologueTransaction {
     pub epoch: u64,
     pub checkpoint_sequence_number: CheckpointSequenceNumber,
-    pub timestamp_ms: u64,
     /// The checkpoint sequence number this was viewed at.
     pub checkpoint_viewed_at: u64,
 }
@@ -34,8 +33,4 @@ impl RollbackPrologueTransaction {
         self.checkpoint_sequence_number
     }
 
-    /// Unix timestamp for the rollback operation.
-    async fn timestamp(&self) -> Result<DateTime, Error> {
-        Ok(DateTime::from_ms(self.timestamp_ms as i64)?)
-    }
 }
