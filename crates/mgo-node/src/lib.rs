@@ -558,27 +558,38 @@ impl MgoNode {
             )?;
             
             let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
-                aggregated.checkpoint,
+                aggregated.checkpoint.clone(),
                 quorum_signature,
             );
             
             // Convert to VerifiedCheckpoint and insert into store
             let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
             
-            // Insert the checkpoint directly into the store
-            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+            // Create empty checkpoint contents for the rollback checkpoint
             let empty_checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
                 std::iter::empty(),
                 vec![],
             );
-            checkpoint_store.insert_checkpoint_contents(empty_checkpoint_contents)?;
             
-            // Update the watermarks to mark this checkpoint as synced
-            // This is critical for the node to recognize the rollback checkpoint as the starting point
+            // Insert into checkpoint store tables
+            checkpoint_store.insert_checkpoint_contents(empty_checkpoint_contents.clone())?;
+            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+            
+            // CRITICAL: Insert into builder tables so CheckpointBuilder can find it
+            // This is what was missing and causing the fork detection error
+            if epoch_store.epoch() == aggregated.checkpoint.epoch {
+                info!("Inserting rollback checkpoint into builder tables for epoch {}", aggregated.checkpoint.epoch);
+                epoch_store.put_genesis_checkpoint_in_builder(&aggregated.checkpoint, &empty_checkpoint_contents)?;
+            }
+            
+            // Update the watermarks to mark this checkpoint as synced and verified
             checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
             checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
             
-            info!("Stored rollback checkpoint {} in checkpoint store and updated watermarks", 
+            // Also insert into certified_checkpoints table for consistency
+            checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
+            
+            info!("Successfully stored rollback checkpoint {} in all necessary tables", 
                   verified_checkpoint.sequence_number());
         }
 
