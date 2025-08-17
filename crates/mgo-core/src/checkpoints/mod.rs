@@ -726,6 +726,7 @@ impl CheckpointStore {
             .map(| ed | (ed.transaction, ed.effects))
             .unzip();
         
+        assert(max_certified_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.certified_checkpoints, &(target_seq+1), &(max_certified_checkpoint+1))?;
         info!("Added {} certified checkpoints to remove", max_certified_checkpoint - target_seq);
         
@@ -762,6 +763,7 @@ impl CheckpointStore {
             .map(|ed| (ed.transaction, ed.effects))
             .unzip();
         
+        assert(max_state_synced_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
         info!("Added {} state synced checkpoints to remove", state_synced_checkpoint_to_remove.len());
         
@@ -795,6 +797,7 @@ impl CheckpointStore {
             .map(| ed | (ed.transaction, ed.effects))
             .unzip();
 
+        assert(max_locally_computed_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
         info!("Added {} locally computed checkpoints to remove", locally_computed_checkpoint_to_remove.len());
         
@@ -819,6 +822,8 @@ impl CheckpointStore {
             .next()
             .map(|(epoch_id, _)| epoch_id)
             .unwrap_or(target_epoch);
+        
+        assert(max_epoch+1 >= target_epoch);
         batch.schedule_delete_range(&self.epoch_last_checkpoint_map, &target_epoch, &(max_epoch+1))?;
         info!("Added {} epochs to remove", max_epoch - target_epoch + 1);
         
