@@ -585,10 +585,10 @@ impl MgoNode {
             
             // Update the watermarks to mark this checkpoint as synced and verified
             checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
-            checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
+            // checkpoint_store.update_highest_verified_checkpoint(&verified_checkpoint)?;
             
             // Also insert into certified_checkpoints table for consistency
-            checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
+            // checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
             
             info!("Successfully stored rollback checkpoint {} in all necessary tables", 
                   verified_checkpoint.sequence_number());
