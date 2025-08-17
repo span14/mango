@@ -545,7 +545,7 @@ impl AuthorityPerpetualTables {
                 "Rollback validation passed: target_epoch={}, max_existing_epoch={}",
                 target_epoch, max_epoch
             );
-            assert(max_epoch+1 >= target_epoch);
+            assert!(max_epoch+1 >= target_epoch);
             batch.schedule_delete_range(&self.root_state_hash_by_epoch, &target_epoch, &(max_epoch+1))?;
             info!("Added {} of root state hashes to remove", max_epoch + 1 - target_epoch);
         }
@@ -644,7 +644,7 @@ impl AuthorityPerpetualTables {
                 .range_iter((target_epoch, ObjectKey::ZERO)..(max_marker_epoch + 1, ObjectKey::ZERO))
                 .map(|((_, obj), _)| obj)
                 .collect::<Vec<_>>();
-            assert(target_epoch >= max_epoch+1);
+            assert!(target_epoch >= max_epoch+1);
             batch.schedule_delete_range(&self.object_per_epoch_marker_table, &(target_epoch, ObjectKey::ZERO), &(max_marker_epoch + 1, ObjectKey::ZERO))?;
             info!("Added {} of object epoch markers to remove", marker_objects_to_remove.len());
         } else {

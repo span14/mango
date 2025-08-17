@@ -82,7 +82,7 @@ impl CommitteeStore {
             ));
         }
 
-        assert(max_epoch+1 >= target_epoch+1);
+        assert!(max_epoch+1 >= target_epoch+1);
         // Remove committee decision after target epoch
         let mut batch = tables.committee_map.batch();
         batch.schedule_delete_range(&tables.committee_map, &(target_epoch + 1), &(max_epoch + 1))?;
