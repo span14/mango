@@ -112,6 +112,17 @@ fn main() {
 
     drop(metrics_rt);
 
+    info!("Mgo Node version: {VERSION}");
+    info!(
+        "Supported protocol versions: {:?}",
+        config.supported_protocol_versions
+    );
+
+    info!(
+        "Started Prometheus HTTP endpoint at {}",
+        config.metrics_address
+    );
+
     // Handle rollback if requested
     if let Some(epoch_id) = args.rollback_to_epoch {
 
@@ -144,17 +155,6 @@ fn main() {
         info!("Rollback to epoch {} completed successfully", epoch_id);
         return;
     }
-
-    info!("Mgo Node version: {VERSION}");
-    info!(
-        "Supported protocol versions: {:?}",
-        config.supported_protocol_versions
-    );
-
-    info!(
-        "Started Prometheus HTTP endpoint at {}",
-        config.metrics_address
-    );
 
     {
         let _enter = runtimes.metrics.enter();
