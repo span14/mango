@@ -567,9 +567,18 @@ impl MgoNode {
                 quorum_signature,
             );
 
+
+            info!("Creating checkpoint content with epoch {} and sequence {}, aggregated epoch is {}", 
+                  epoch_store.epoch(), aggregated.checkpoint.sequence_number, aggregated.checkpoint.epoch);
+
             let contents = Self::create_rollback_checkpoint_contents(
                 epoch_store.epoch(),
                 aggregated.checkpoint.sequence_number,
+            );
+            info!(
+                "Recreated content digest: {}, and aggregated content digest: {}",
+                contents.digest(),
+                aggregated.checkpoint.content_digest
             );
             
             // Convert to VerifiedCheckpoint and insert into store
@@ -893,7 +902,7 @@ impl MgoNode {
     ) -> CheckpointSummary {
         
         let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence);
-
+        info!("Checkpoint Content is: {:?} with hash: {}", checkpoint_contents, checkpoint_contents.digest());
         // Create checkpoint summary with the rollback transaction
         let checkpoint = CheckpointSummary::new(
             epoch_id,

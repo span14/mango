@@ -87,6 +87,31 @@ fn main() {
     );
     config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
 
+    // match run_with_range args
+    // this means that we always modify the config used to start the node
+    // for run_with_range. i.e if this is set in the config, it is ignored. only the cli args
+    // enable/disable run_with_range
+    match (args.run_with_range_epoch, args.run_with_range_checkpoint) {
+        (None, Some(checkpoint)) => {
+            config.run_with_range = Some(RunWithRange::Checkpoint(checkpoint))
+        }
+        (Some(epoch), None) => config.run_with_range = Some(RunWithRange::Epoch(epoch)),
+        _ => config.run_with_range = None,
+    };
+
+    let runtimes = MgoRuntimes::new(&config);
+    let metrics_rt = runtimes.metrics.enter();
+    let registry_service = mango_metrics::start_prometheus_server(config.metrics_address);
+    let prometheus_registry = registry_service.default_registry();
+
+    // Initialize logging
+    let (_guard, filter_handle) = telemetry_subscribers::TelemetryConfig::new()
+        .with_env()
+        .with_prom_registry(&prometheus_registry)
+        .init();
+
+    drop(metrics_rt);
+
     // Handle rollback if requested
     if let Some(epoch_id) = args.rollback_to_epoch {
 
@@ -119,31 +144,6 @@ fn main() {
         info!("Rollback to epoch {} completed successfully", epoch_id);
         return;
     }
-
-    // match run_with_range args
-    // this means that we always modify the config used to start the node
-    // for run_with_range. i.e if this is set in the config, it is ignored. only the cli args
-    // enable/disable run_with_range
-    match (args.run_with_range_epoch, args.run_with_range_checkpoint) {
-        (None, Some(checkpoint)) => {
-            config.run_with_range = Some(RunWithRange::Checkpoint(checkpoint))
-        }
-        (Some(epoch), None) => config.run_with_range = Some(RunWithRange::Epoch(epoch)),
-        _ => config.run_with_range = None,
-    };
-
-    let runtimes = MgoRuntimes::new(&config);
-    let metrics_rt = runtimes.metrics.enter();
-    let registry_service = mango_metrics::start_prometheus_server(config.metrics_address);
-    let prometheus_registry = registry_service.default_registry();
-
-    // Initialize logging
-    let (_guard, filter_handle) = telemetry_subscribers::TelemetryConfig::new()
-        .with_env()
-        .with_prom_registry(&prometheus_registry)
-        .init();
-
-    drop(metrics_rt);
 
     info!("Mgo Node version: {VERSION}");
     info!(
