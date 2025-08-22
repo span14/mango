@@ -11,7 +11,7 @@ use std::{
 };
 use mgo_genesis_builder::validator_info::GenesisValidatorInfo;
 use mgo_types::{
-    base_types::{MgoAddress, ObjectID, ObjectRef}, crypto::{AuthorityPublicKey, AuthoritySignInfo, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID}, messages_checkpoint::{CheckpointContents, CheckpointSummary}, mgo_system_state::{
+    base_types::{MgoAddress, ObjectID, ObjectRef}, crypto::{AuthorityPublicKey, AuthoritySignInfo, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID}, messages_checkpoint::{FullCheckpointContents, CheckpointSummary}, mgo_system_state::{
         mgo_system_state_inner_v1::{UnverifiedValidatorOperationCapV1, ValidatorV1},
         mgo_system_state_summary::{MgoSystemStateSummary, MgoValidatorSummary},
     }, multiaddr::Multiaddr, object::Owner, MGO_SYSTEM_PACKAGE_ID
@@ -1096,7 +1096,7 @@ async fn aggregate_rollback_checkpoint_signatures(
     #[derive(Serialize, Deserialize)]
     struct RollbackCheckpointData {
         checkpoint: CheckpointSummary,
-        content: CheckpointContents,
+        content: FullCheckpointContents,
         signature: AuthoritySignInfo,
     }
     
@@ -1105,7 +1105,7 @@ async fn aggregate_rollback_checkpoint_signatures(
     // Read all JSON files from the signatures directory
     let mut signatures = Vec::<AuthoritySignInfo>::new();
     let mut checkpoint_summary: Option<CheckpointSummary> = None;
-    let mut checkpoint_content: Option<CheckpointContents> = None;
+    let mut checkpoint_content: Option<FullCheckpointContents> = None;
     
     let entries = fs::read_dir(&signatures_dir)?;
     for entry in entries {
@@ -1185,7 +1185,7 @@ async fn aggregate_rollback_checkpoint_signatures(
 #[derive(Debug, Serialize)]
 struct RollbackCheckpointAggregation {
     checkpoint: CheckpointSummary,
-    content: CheckpointContents,
+    content: FullCheckpointContents,
     signatures: Vec<AuthoritySignInfo>,
     epoch: u64,
     timestamp: u64,
