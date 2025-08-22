@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 struct RollbackCheckpointAggregation {
     checkpoint: CheckpointSummary,
+    content: CheckpointContents,
     signatures: Vec<AuthoritySignInfo>,
     epoch: u64,
     timestamp: u64,
@@ -552,6 +553,7 @@ impl MgoNode {
             info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
                   aggregated.signatures.len(), aggregated.epoch);
             
+            assert!(aggregated.checkpoint.content_digest == aggregated.content.digest().clone(), "Unmatched checkpoint content digest");
             // Create a certified checkpoint from the aggregated data
             // This is similar to how genesis processes the initial checkpoint
             let committee = epoch_store.committee();
@@ -567,19 +569,7 @@ impl MgoNode {
                 quorum_signature,
             );
 
-
-            info!("Creating checkpoint content with epoch {} and sequence {}, aggregated epoch is {}", 
-                  epoch_store.epoch(), aggregated.checkpoint.sequence_number, aggregated.checkpoint.epoch);
-
-            let contents = Self::create_rollback_checkpoint_contents(
-                epoch_store.epoch(),
-                aggregated.checkpoint.sequence_number,
-            );
-            info!(
-                "Recreated content digest: {}, and aggregated content digest: {}",
-                contents.digest(),
-                aggregated.checkpoint.content_digest
-            );
+            let contents = aggregated.content;
             
             // Convert to VerifiedCheckpoint and insert into store
             let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
@@ -899,10 +889,10 @@ impl MgoNode {
         checkpoint_sequence: CheckpointSequenceNumber,
         previous_digest: CheckpointDigest,
         created_timestamp_ms: CheckpointTimestamp,
-    ) -> CheckpointSummary {
+    ) -> (CheckpointSummary, CheckpointContents) {
         
         let checkpoint_contents = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence);
-        info!("Checkpoint Content is: {:?} with hash: {}", checkpoint_contents, checkpoint_contents.digest());
+        println!("Checkpoint Content is: {:?} with hash: {}", checkpoint_contents, checkpoint_contents.digest());
         // Create checkpoint summary with the rollback transaction
         let checkpoint = CheckpointSummary::new(
             epoch_id,
@@ -915,7 +905,7 @@ impl MgoNode {
             created_timestamp_ms,
         );
         
-        checkpoint
+        (checkpoint, checkpoint_contents)
     }
     
     fn sign_rollback_checkpoint(
@@ -946,6 +936,7 @@ impl MgoNode {
     fn export_signed_checkpoint(
         checkpoint: &CheckpointSummary,
         signed_checkpoint: &AuthoritySignInfo,
+        checkpoint_content: &CheckpointContents,
         rollback_checkpoint_dir: &PathBuf,
         epoch_id: EpochId,
     ) -> Result<()> {
@@ -955,6 +946,7 @@ impl MgoNode {
         struct RollbackCheckpointData {
             checkpoint: CheckpointSummary,
             signature: AuthoritySignInfo,
+            content: CheckpointContents,
         }
         
         let authority_hex = format!("{:10}", signed_checkpoint.authority);
@@ -964,6 +956,7 @@ impl MgoNode {
         let data = RollbackCheckpointData {
             checkpoint: checkpoint.clone(),
             signature: signed_checkpoint.clone(),
+            content: checkpoint_content.clone(),
         };
         
         let json_data = serde_json::to_string_pretty(&data)?;
@@ -1072,7 +1065,7 @@ impl MgoNode {
         let latest_checkpoint = checkpoint_store.get_epoch_last_checkpoint(epoch_id-1)?.unwrap().into_inner();
 
         // Create and sign rollback checkpoint with bootstrap transaction
-        let rollback_checkpoint = Self::create_rollback_checkpoint(
+        let (rollback_checkpoint, rollback_checkpoint_content) = Self::create_rollback_checkpoint(
             epoch_id,
             latest_checkpoint.sequence_number() + 1,
             latest_checkpoint.digest().clone(),
@@ -1081,7 +1074,13 @@ impl MgoNode {
         let signed_checkpoint = Self::sign_rollback_checkpoint(&rollback_checkpoint, &config);
         
         // Export checkpoint and contents separately for aggregation
-        Self::export_signed_checkpoint(&rollback_checkpoint, &signed_checkpoint, &rollback_checkpoint_dir, epoch_id)?;
+        Self::export_signed_checkpoint(
+            &rollback_checkpoint, 
+            &signed_checkpoint, 
+            &rollback_checkpoint_content, 
+            &rollback_checkpoint_dir, 
+            epoch_id
+        )?;
 
         Ok(())
 

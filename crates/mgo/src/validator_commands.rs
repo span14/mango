@@ -11,16 +11,10 @@ use std::{
 };
 use mgo_genesis_builder::validator_info::GenesisValidatorInfo;
 use mgo_types::{
-    base_types::{ObjectID, ObjectRef, MgoAddress},
-    crypto::{AuthorityPublicKey, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID, AuthoritySignInfo},
-    multiaddr::Multiaddr,
-    object::Owner,
-    messages_checkpoint::CheckpointSummary,
-    mgo_system_state::{
+    base_types::{MgoAddress, ObjectID, ObjectRef}, crypto::{AuthorityPublicKey, AuthoritySignInfo, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID}, messages_checkpoint::{CheckpointContents, CheckpointSummary}, mgo_system_state::{
         mgo_system_state_inner_v1::{UnverifiedValidatorOperationCapV1, ValidatorV1},
         mgo_system_state_summary::{MgoSystemStateSummary, MgoValidatorSummary},
-    },
-    MGO_SYSTEM_PACKAGE_ID,
+    }, multiaddr::Multiaddr, object::Owner, MGO_SYSTEM_PACKAGE_ID
 };
 use tap::tap::TapOptional;
 
@@ -1102,6 +1096,7 @@ async fn aggregate_rollback_checkpoint_signatures(
     #[derive(Serialize, Deserialize)]
     struct RollbackCheckpointData {
         checkpoint: CheckpointSummary,
+        content: CheckpointContents,
         signature: AuthoritySignInfo,
     }
     
@@ -1110,6 +1105,7 @@ async fn aggregate_rollback_checkpoint_signatures(
     // Read all JSON files from the signatures directory
     let mut signatures = Vec::<AuthoritySignInfo>::new();
     let mut checkpoint_summary: Option<CheckpointSummary> = None;
+    let mut checkpoint_content: Option<CheckpointContents> = None;
     
     let entries = fs::read_dir(&signatures_dir)?;
     for entry in entries {
@@ -1129,6 +1125,11 @@ async fn aggregate_rollback_checkpoint_signatures(
                     if checkpoint_summary.is_none() {
                         checkpoint_summary = Some(checkpoint_data.checkpoint);
                     }
+
+                    if checkpoint_content.is_none() {
+                        checkpoint_content = Some(checkpoint_data.content);
+                    }
+
                 } else {
                     warn!("Skipping signature from wrong epoch {} (expected {})", checkpoint_data.signature.epoch, epoch);
                 }
@@ -1145,6 +1146,10 @@ async fn aggregate_rollback_checkpoint_signatures(
     let checkpoint = checkpoint_summary.ok_or_else(|| {
         anyhow!("No valid checkpoint found in signatures directory")
     })?;
+
+    let content = checkpoint_content.ok_or_else(|| {
+        anyhow!("No valid checkpoint content found in signatures directory")
+    })?;
     
     // For now, we'll create a simple result structure
     // In a real implementation, you would need committee information to check quorum
@@ -1153,6 +1158,7 @@ async fn aggregate_rollback_checkpoint_signatures(
     // Create aggregation result
     let result_data = RollbackCheckpointAggregation {
         checkpoint,
+        content,
         signatures,
         epoch,
         timestamp: std::time::SystemTime::now()
@@ -1179,6 +1185,7 @@ async fn aggregate_rollback_checkpoint_signatures(
 #[derive(Debug, Serialize)]
 struct RollbackCheckpointAggregation {
     checkpoint: CheckpointSummary,
+    content: CheckpointContents,
     signatures: Vec<AuthoritySignInfo>,
     epoch: u64,
     timestamp: u64,
