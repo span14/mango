@@ -4045,9 +4045,15 @@ impl AuthorityState {
         max_binary_format_version: u32,
         no_extraneous_module_bytes: bool,
     ) -> Vec<ObjectRef> {
+        info!(
+            "GET_AVAILABLE_SYSTEM_PACKAGES: Starting system package compatibility checks, max_binary_format_version: {}, no_extraneous_module_bytes: {}",
+            max_binary_format_version, no_extraneous_module_bytes
+        );
         let mut results = vec![];
 
         let system_packages = BuiltInFramework::iter_system_packages();
+        let package_count = system_packages.size_hint().0;
+        info!("GET_AVAILABLE_SYSTEM_PACKAGES: Found {} built-in system packages to check", package_count);
 
         // Add extra framework packages during simtest
         #[cfg(msim)]
@@ -4056,7 +4062,12 @@ impl AuthorityState {
         let system_packages = system_packages.map(|p| p).chain(extra_packages.iter());
 
         for system_package in system_packages {
+            let package_id = system_package.id();
             let modules = system_package.modules().to_vec();
+            info!(
+                "GET_AVAILABLE_SYSTEM_PACKAGES: Processing system package {}, {} modules, {} dependencies",
+                package_id, modules.len(), system_package.dependencies().len()
+            );
             // In simtests, we could override the current built-in framework packages.
             #[cfg(msim)]
             let modules = framework_injection::get_override_modules(system_package.id(), self.name)
@@ -4072,11 +4083,23 @@ impl AuthorityState {
             )
             .await
             else {
+                error!(
+                    "GET_AVAILABLE_SYSTEM_PACKAGES: Compatibility check failed for system package {}, returning empty list",
+                    package_id
+                );
                 return vec![];
             };
+            info!(
+                "GET_AVAILABLE_SYSTEM_PACKAGES: System package {} is compatible, reference: {:?}",
+                package_id, obj_ref
+            );
             results.push(obj_ref);
         }
 
+        info!(
+            "GET_AVAILABLE_SYSTEM_PACKAGES: Completed compatibility checks, {} system packages are available",
+            results.len()
+        );
         results
     }
 

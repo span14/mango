@@ -1738,18 +1738,27 @@ impl MgoNode {
                 let config = cur_epoch_store.protocol_config();
                 let max_binary_format_version = config.move_binary_format_version();
                 let no_extraneous_module_bytes = config.no_extraneous_module_bytes();
+                info!(
+                    "NODE_STARTUP_CAPABILITIES: Getting available system packages with max_binary_format_version: {}, no_extraneous_module_bytes: {}",
+                    max_binary_format_version, no_extraneous_module_bytes
+                );
+                let available_system_packages = self.state
+                    .get_available_system_packages(
+                        max_binary_format_version,
+                        no_extraneous_module_bytes,
+                    )
+                    .await;
+                info!(
+                    "NODE_STARTUP_CAPABILITIES: Retrieved {} available system packages",
+                    available_system_packages.len()
+                );
                 let transaction =
                     ConsensusTransaction::new_capability_notification(AuthorityCapabilities::new(
                         self.state.name,
                         self.config
                             .supported_protocol_versions
                             .expect("Supported versions should be populated"),
-                        self.state
-                            .get_available_system_packages(
-                                max_binary_format_version,
-                                no_extraneous_module_bytes,
-                            )
-                            .await,
+                        available_system_packages,
                     ));
                 info!(?transaction, "submitting capabilities to consensus");
                 components

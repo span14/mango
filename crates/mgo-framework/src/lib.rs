@@ -11,7 +11,7 @@ use std::fmt::Formatter;
 use mgo_types::base_types::ObjectRef;
 use mgo_types::storage::ObjectStore;
 use mgo_types::{base_types::ObjectID, digests::TransactionDigest, move_package::MovePackage, object::{Object, OBJECT_START_VERSION}, MOVE_STDLIB_PACKAGE_ID, MGO_FRAMEWORK_PACKAGE_ID, MGO_SYSTEM_PACKAGE_ID, MGO_INSCRIPTION_PACKAGE_ID};
-use tracing::error;
+use tracing::{error, info};
 
 /// Represents a system package in the framework, that's built from the source code inside
 /// mgo-framework.
@@ -162,11 +162,23 @@ pub async fn compare_system_package<S: ObjectStore>(
     max_binary_format_version: u32,
     no_extraneous_module_bytes: bool,
 ) -> Option<ObjectRef> {
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Starting compatibility check for package {}, {} modules, {} dependencies, max_binary_format_version: {}, no_extraneous_module_bytes: {}",
+        id,
+        modules.len(),
+        dependencies.len(),
+        max_binary_format_version,
+        no_extraneous_module_bytes
+    );
     let cur_object = match object_store.get_object(id) {
         Ok(Some(cur_object)) => cur_object,
 
         Ok(None) => {
             // creating a new framework package--nothing to check
+            info!(
+                "COMPARE_SYSTEM_PACKAGE: Package {} not found in object store, creating new system package with version {}",
+                id, OBJECT_START_VERSION
+            );
             return Some(
                 Object::new_system_package(
                     modules,
@@ -183,12 +195,16 @@ pub async fn compare_system_package<S: ObjectStore>(
         }
 
         Err(e) => {
-            error!("Error loading framework object at {id}: {e:?}");
+            error!("COMPARE_SYSTEM_PACKAGE: Error loading framework object at {id}: {e:?}");
             return None;
         }
     };
 
     let cur_ref = cur_object.compute_object_reference();
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Found existing package {}, version: {}, reference: {:?}",
+        id, cur_object.version(), cur_ref
+    );
     let cur_pkg = cur_object
         .data
         .try_as_package()
@@ -203,9 +219,18 @@ pub async fn compare_system_package<S: ObjectStore>(
         cur_object.previous_transaction,
     );
 
-    if cur_ref == new_object.compute_object_reference() {
+    let new_ref = new_object.compute_object_reference();
+    if cur_ref == new_ref {
+        info!(
+            "COMPARE_SYSTEM_PACKAGE: Package {} unchanged, current and new references match: {:?}",
+            id, cur_ref
+        );
         return Some(cur_ref);
     }
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Package {} changed, current ref: {:?}, new ref: {:?}, proceeding with compatibility check",
+        id, cur_ref, new_ref
+    );
 
     let compatibility = Compatibility {
         check_struct_and_pub_function_linking: true,
@@ -233,25 +258,42 @@ pub async fn compare_system_package<S: ObjectStore>(
         match cur_pkg.normalize(max_binary_format_version, no_extraneous_module_bytes) {
             Ok(v) => v,
             Err(e) => {
-                error!("Could not normalize existing package: {e:?}");
+                error!("COMPARE_SYSTEM_PACKAGE: Could not normalize existing package {}: {e:?}", id);
                 return None;
             }
         };
-    let mut new_normalized = new_pkg
-        .normalize(max_binary_format_version, no_extraneous_module_bytes)
-        .ok()?;
+    let mut new_normalized = match new_pkg
+        .normalize(max_binary_format_version, no_extraneous_module_bytes) {
+        Ok(normalized) => normalized,
+        Err(e) => {
+            error!("COMPARE_SYSTEM_PACKAGE: Could not normalize new package {}: {e:?}", id);
+            return None;
+        }
+    };
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Package {} normalization successful, checking {} modules for compatibility",
+        id, cur_normalized.len()
+    );
 
     for (name, cur_module) in cur_normalized {
         let Some(new_module) = new_normalized.remove(&name) else {
+            error!("COMPARE_SYSTEM_PACKAGE: Module {name} missing in new package {id}");
             return None;
         };
 
+        info!("COMPARE_SYSTEM_PACKAGE: Checking compatibility for module {id}::{name}");
         if let Err(e) = compatibility.check(&cur_module, &new_module) {
-            error!("Compatibility check failed, for new version of {id}::{name}: {e:?}");
+            error!("COMPARE_SYSTEM_PACKAGE: Compatibility check failed, for new version of {id}::{name}: {e:?}");
             return None;
         }
+        info!("COMPARE_SYSTEM_PACKAGE: Module {id}::{name} is compatible");
     }
 
     new_pkg.increment_version();
-    Some(new_object.compute_object_reference())
+    let final_ref = new_object.compute_object_reference();
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Package {} compatibility check passed, new version: {}, final reference: {:?}",
+        id, new_object.version(), final_ref
+    );
+    Some(final_ref)
 }
