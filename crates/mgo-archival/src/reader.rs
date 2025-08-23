@@ -65,6 +65,13 @@ pub struct ArchiveReaderBalancer {
 }
 
 impl ArchiveReaderBalancer {
+
+    pub fn empty() -> Self {
+        Self {
+            readers: vec![],
+        }
+    }
+
     pub fn new(configs: Vec<ArchiveReaderConfig>, registry: &Registry) -> Result<Self> {
         info!("ARCHIVE_READER_BALANCER: Initializing with {} archive reader configs", configs.len());
         

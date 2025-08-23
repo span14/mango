@@ -542,7 +542,7 @@ impl MgoNode {
             genesis.checkpoint_contents().clone(),
             &epoch_store,
         );
-        
+
         // // If we have a rollback checkpoint file, load and process it before starting checkpoint service
         // let aggregated_checkpoint_and_full_content = if let Some(ref checkpoint_path) = rollback_checkpoint_path {
         //     info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
@@ -630,8 +630,10 @@ impl MgoNode {
         // Create network
         // TODO only configure validators as seed/preferred peers for validators and not for
         // fullnodes once we've had a chance to re-work fullnode configuration generation.
-        let archive_readers =
-            ArchiveReaderBalancer::new(config.archive_reader_config(), &prometheus_registry)?;
+        // let archive_readers = 
+        //     ArchiveReaderBalancer::new(config.archive_reader_config(), &prometheus_registry)?;
+        let archive_readers = ArchiveReaderBalancer::empty();
+
         let (trusted_peer_change_tx, trusted_peer_change_rx) = watch::channel(Default::default());
         let (p2p_network, discovery_handle, state_sync_handle) = Self::create_p2p_network(
             &config,
