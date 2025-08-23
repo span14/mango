@@ -31,7 +31,7 @@ use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 
 use mgo_types::crypto::{get_key_pair_from_rng, AccountKeyPair, AuthorityKeyPair};
 use mgo_types::multiaddr::Multiaddr;
-use tracing::info;
+use tracing::{info, warn};
 
 // Default max number of concurrent requests served
 pub const DEFAULT_GRPC_CONCURRENCY_LIMIT: usize = 20000000000;
@@ -319,20 +319,32 @@ impl NodeConfig {
     }
 
     pub fn archive_reader_config(&self) -> Vec<ArchiveReaderConfig> {
-        self.state_archive_read_config
+        info!("Loading archive reader config, found {} state_archive_read_config entries", self.state_archive_read_config.len());
+        
+        let configs = self.state_archive_read_config
             .iter()
-            .flat_map(|config| {
-                config
-                    .object_store_config
-                    .as_ref()
-                    .map(|remote_store_config| ArchiveReaderConfig {
-                        remote_store_config: remote_store_config.clone(),
-                        download_concurrency: NonZeroUsize::new(config.concurrency)
-                            .unwrap_or(NonZeroUsize::new(5).unwrap()),
-                        use_for_pruning_watermark: config.use_for_pruning_watermark,
-                    })
+            .enumerate()
+            .flat_map(|(idx, config)| {
+                match &config.object_store_config {
+                    Some(remote_store_config) => {
+                        info!("Archive reader config {}: Found object store config for {:?}", idx, remote_store_config.object_store);
+                        Some(ArchiveReaderConfig {
+                            remote_store_config: remote_store_config.clone(),
+                            download_concurrency: NonZeroUsize::new(config.concurrency)
+                                .unwrap_or(NonZeroUsize::new(5).unwrap()),
+                            use_for_pruning_watermark: config.use_for_pruning_watermark,
+                        })
+                    },
+                    None => {
+                        warn!("Archive reader config {}: Missing object_store_config", idx);
+                        None
+                    }
+                }
             })
-            .collect()
+            .collect::<Vec<_>>();
+            
+        info!("Archive reader config: Successfully loaded {} archive reader configurations", configs.len());
+        configs
     }
 }
 

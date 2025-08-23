@@ -28,7 +28,7 @@ use mgo_types::messages_checkpoint::{
 use mgo_types::storage::WriteStore;
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Debug)]
 pub struct ArchiveReaderMetrics {
@@ -66,11 +66,30 @@ pub struct ArchiveReaderBalancer {
 
 impl ArchiveReaderBalancer {
     pub fn new(configs: Vec<ArchiveReaderConfig>, registry: &Registry) -> Result<Self> {
+        info!("ARCHIVE_READER_BALANCER: Initializing with {} archive reader configs", configs.len());
+        
         let mut readers = vec![];
         let metrics = ArchiveReaderMetrics::new(registry);
-        for config in configs.into_iter() {
-            readers.push(Arc::new(ArchiveReader::new(config.clone(), &metrics)?));
+        
+        for (idx, config) in configs.into_iter().enumerate() {
+            info!("ARCHIVE_READER_BALANCER: Creating archive reader {}: {:?}, bucket: {:?}", 
+                idx, 
+                config.remote_store_config.object_store,
+                config.remote_store_config.bucket);
+                
+            match ArchiveReader::new(config.clone(), &metrics) {
+                Ok(reader) => {
+                    info!("ARCHIVE_READER_BALANCER: Successfully created archive reader {}", idx);
+                    readers.push(Arc::new(reader));
+                },
+                Err(e) => {
+                    error!("ARCHIVE_READER_BALANCER: Failed to create archive reader {}: {}", idx, e);
+                    return Err(e);
+                }
+            }
         }
+        
+        info!("ARCHIVE_READER_BALANCER: Successfully initialized with {} active readers", readers.len());
         Ok(ArchiveReaderBalancer { readers })
     }
     pub async fn get_archive_watermark(&self) -> Result<Option<u64>> {
@@ -147,15 +166,27 @@ impl ArchiveReader {
             .bucket
             .clone()
             .unwrap_or("unknown".to_string());
+            
+        info!("ARCHIVE_READER: Initializing for bucket '{}', object_store: {:?}", 
+              bucket, config.remote_store_config.object_store);
+              
         let remote_object_store = if config.remote_store_config.no_sign_request {
+            info!("ARCHIVE_READER: Creating HTTP client (no_sign_request=true) for bucket '{}'", bucket);
             config.remote_store_config.make_http()?
         } else {
+            info!("ARCHIVE_READER: Creating signed client for bucket '{}'", bucket);
             config.remote_store_config.make().map(Arc::new)?
         };
+        
+        info!("ARCHIVE_READER: Successfully created object store client for bucket '{}'", bucket);
+        
         let (sender, recv) = oneshot::channel();
         let manifest = Arc::new(Mutex::new(Manifest::new(0, 0)));
         // Start a background tokio task to keep local manifest in sync with remote
         Self::spawn_manifest_sync_task(remote_object_store.clone(), manifest.clone(), recv);
+        
+        info!("ARCHIVE_READER: Started manifest sync task for bucket '{}'", bucket);
+        
         Ok(ArchiveReader {
             bucket,
             manifest,
@@ -616,18 +647,41 @@ impl ArchiveReader {
         mut recv: oneshot::Receiver<()>,
     ) {
         tokio::task::spawn(async move {
+            info!("ARCHIVE_READER: Starting manifest sync task");
             let mut interval = tokio::time::interval(Duration::from_secs(60));
+            
+            // Initial manifest sync attempt
+            match read_manifest(remote_store.clone()).await {
+                Ok(initial_manifest) => {
+                    info!("ARCHIVE_READER: Successfully read initial manifest with epoch: {} and next_checkpoint_seq_num: {}", 
+                          initial_manifest.epoch_num(), initial_manifest.next_checkpoint_seq_num());
+                    let mut locked = manifest.lock().await;
+                    *locked = initial_manifest;
+                },
+                Err(e) => {
+                    error!("ARCHIVE_READER: Failed to read initial manifest: {}", e);
+                }
+            }
+            
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let new_manifest = read_manifest(remote_store.clone()).await?;
-                        let mut locked = manifest.lock().await;
-                        *locked = new_manifest;
+                        match read_manifest(remote_store.clone()).await {
+                            Ok(new_manifest) => {
+                                info!("ARCHIVE_READER: Successfully synced manifest with epoch: {} and next_checkpoint_seq_num: {}", 
+                                      new_manifest.epoch_num(), new_manifest.next_checkpoint_seq_num());
+                                let mut locked = manifest.lock().await;
+                                *locked = new_manifest;
+                            },
+                            Err(e) => {
+                                error!("ARCHIVE_READER: Failed to sync manifest: {}", e);
+                            }
+                        }
                     }
                     _ = &mut recv => break,
                 }
             }
-            info!("Terminating the manifest sync loop");
+            info!("ARCHIVE_READER: Terminating the manifest sync loop");
             Ok::<(), anyhow::Error>(())
         });
     }
