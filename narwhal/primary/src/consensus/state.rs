@@ -70,7 +70,20 @@ impl ConsensusState {
         latest_sub_dag: Option<ConsensusCommit>,
         cert_store: CertificateStore,
     ) -> Self {
+        info!("CONSENSUS_STATE_INIT: Creating ConsensusState from store:");
+        info!("CONSENSUS_STATE_INIT:   last_committed_round: {}", last_committed_round);
+        info!("CONSENSUS_STATE_INIT:   gc_depth: {}", gc_depth);
+        info!("CONSENSUS_STATE_INIT:   recovered_last_committed: {:?}", recovered_last_committed);
+        
+        if let Some(ref sub_dag) = latest_sub_dag {
+            info!("CONSENSUS_STATE_INIT:   latest_sub_dag: round={}, leader={:?}, certs_count={}", 
+                  sub_dag.leader_round(), sub_dag.leader(), sub_dag.certificates().len());
+        } else {
+            info!("CONSENSUS_STATE_INIT:   latest_sub_dag: None");
+        }
+        
         let last_round = ConsensusRound::new_with_gc_depth(last_committed_round, gc_depth);
+        info!("CONSENSUS_STATE_INIT:   computed gc_round: {}", last_round.gc_round);
 
         let dag = Self::construct_dag_from_cert_store(
             &cert_store,
@@ -106,14 +119,24 @@ impl ConsensusState {
             None
         };
 
-        Self {
+        let state = Self {
             gc_depth,
             last_round,
             last_committed: recovered_last_committed,
             last_committed_sub_dag,
             dag,
             metrics,
-        }
+        };
+        
+        info!("CONSENSUS_STATE_INIT: Final ConsensusState created:");
+        info!("CONSENSUS_STATE_INIT:   final last_round: committed={}, gc={}", 
+              state.last_round.committed_round, state.last_round.gc_round);
+        info!("CONSENSUS_STATE_INIT:   final dag has {} rounds with total {} certificates", 
+              state.dag.len(), state.dag.values().map(|round| round.len()).sum::<usize>());
+        info!("CONSENSUS_STATE_INIT:   final last_committed_sub_dag: {:?}", 
+              state.last_committed_sub_dag.as_ref().map(|d| format!("round={}", d.leader_round())));
+        
+        state
     }
 
     #[instrument(level = "info", skip_all)]
@@ -124,23 +147,36 @@ impl ConsensusState {
     ) -> Result<Dag, ConsensusError> {
         let mut dag: Dag = BTreeMap::new();
 
-        info!("Recreating dag from last GC round: {}", gc_round);
+        info!("CONSENSUS_STATE_INIT: Recreating dag from last GC round: {}, last_committed: {:?}", 
+              gc_round, last_committed);
 
         // get all certificates at rounds > gc_round
         let certificates = cert_store.after_round(gc_round + 1).unwrap();
+        info!("CONSENSUS_STATE_INIT: Found {} certificates after round {} from cert store", 
+              certificates.len(), gc_round);
 
         let mut num_certs = 0;
+        let mut round_summary: BTreeMap<Round, usize> = BTreeMap::new();
         for cert in &certificates {
             if Self::try_insert_in_dag(&mut dag, last_committed, gc_round, cert)? {
-                info!("Inserted certificate: {:?}", cert);
+                info!("CONSENSUS_STATE_INIT: Inserted certificate: round={}, authority={:?}, digest={:?}", 
+                      cert.header().round(), cert.header().author(), cert.header().digest());
                 num_certs += 1;
+                *round_summary.entry(cert.header().round()).or_insert(0) += 1;
             }
         }
-        info!(
-            "Dag is restored and contains {} certs for {} rounds",
-            num_certs,
-            dag.len()
-        );
+        
+        info!("CONSENSUS_STATE_INIT: Dag restored with {} certs across {} rounds. Round summary: {:?}",
+              num_certs, dag.len(), round_summary);
+              
+        // Log detailed DAG state for each round
+        for (round, authorities) in &dag {
+            let authority_digests: Vec<_> = authorities.iter()
+                .map(|(auth, (digest, _))| format!("{}:{:.8}", auth, digest))
+                .collect();
+            info!("CONSENSUS_STATE_INIT: Round {} has {} authorities: [{}]", 
+                  round, authorities.len(), authority_digests.join(", "));
+        }
 
         Ok(dag)
     }
