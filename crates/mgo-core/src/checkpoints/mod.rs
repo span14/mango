@@ -1144,10 +1144,11 @@ impl CheckpointBuilder {
         }
         let last_checkpoint_seq = last_checkpoint.as_ref().map(|(seq, _)| *seq);
         info!(
-            next_checkpoint_seq = last_checkpoint_seq.unwrap_or_default() + 1,
-            checkpoint_timestamp = details.timestamp_ms,
-            "Creating checkpoint(s) for {} transactions",
+            "CHECKPOINT_BUILDER: Creating checkpoint(s) at sequence {} for {} transactions, timestamp: {}, last_of_epoch: {}",
+            last_checkpoint_seq.unwrap_or_default() + 1,
             all_effects.len(),
+            details.timestamp_ms,
+            details.last_of_epoch,
         );
 
         let all_digests: Vec<_> = all_effects

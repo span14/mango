@@ -91,11 +91,27 @@ impl<T: SubmitToConsensus + ReconfigurationInitiator> CheckpointOutput
             self.authority,
         );
 
+        info!(
+            "CHECKPOINT_SUBMIT: Creating checkpoint signature for sequence {} by authority {:?}, digest: {:?}, epoch: {}",
+            checkpoint_seq, self.authority, summary.digest(), epoch_store.epoch()
+        );
+
         let message = CheckpointSignatureMessage { summary };
         let transaction = ConsensusTransaction::new_checkpoint_signature_message(message);
+        
+        info!(
+            "CHECKPOINT_SUBMIT: Submitting checkpoint signature transaction to consensus for sequence {}, tx type: CheckpointSignature",
+            checkpoint_seq
+        );
+        
         self.sender
             .submit_to_consensus(&transaction, epoch_store)
             .await?;
+        
+        info!(
+            "CHECKPOINT_SUBMIT: Successfully submitted checkpoint signature for sequence {} to consensus",
+            checkpoint_seq
+        );
         self.metrics
             .last_sent_checkpoint_signature
             .set(checkpoint_seq as i64);

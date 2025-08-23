@@ -2798,6 +2798,10 @@ impl AuthorityPerEpochStore {
                 kind: ConsensusTransactionKind::CheckpointSignature(info),
                 ..
             }) => {
+                info!(
+                    "CONSENSUS_HANDLER: Processing CheckpointSignature from consensus, sequence: {}, from authority: {:?}, digest: {:?}",
+                    info.summary.sequence_number, info.summary.auth_sig().authority, info.summary.digest()
+                );
                 // We usually call notify_checkpoint_signature in MgoTxValidator, but that step can
                 // be skipped when a batch is already part of a certificate, so we must also
                 // notify here.
@@ -3155,6 +3159,10 @@ impl AuthorityPerEpochStore {
         index: u64,
         info: &CheckpointSignatureMessage,
     ) -> MgoResult<()> {
+        info!(
+            "CHECKPOINT_AGGREGATOR: Received checkpoint signature for sequence {} from authority {:?}, digest: {:?}, epoch: {}",
+            checkpoint_seq, info.summary.auth_sig().authority, info.summary.digest(), self.epoch()
+        );
         Ok(self
             .tables()?
             .pending_checkpoint_signatures

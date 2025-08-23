@@ -576,7 +576,15 @@ impl ConsensusAdapter {
         lock: Option<&RwLockReadGuard<ReconfigState>>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> MgoResult<JoinHandle<()>> {
+        info!(
+            "CONSENSUS_ADAPTER: Submitting transaction to consensus, kind: {:?}, epoch: {}",
+            transaction.kind(), epoch_store.epoch()
+        );
         epoch_store.insert_pending_consensus_transactions(&transaction, lock)?;
+        info!(
+            "CONSENSUS_ADAPTER: Transaction persisted to pending_consensus_transactions, kind: {:?}",
+            transaction.kind()
+        );
         Ok(self.submit_unchecked(transaction, epoch_store))
     }
 

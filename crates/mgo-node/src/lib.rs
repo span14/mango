@@ -542,66 +542,67 @@ impl MgoNode {
             genesis.checkpoint_contents().clone(),
             &epoch_store,
         );
-        // If we have a rollback checkpoint file, load and process it before starting checkpoint service
-        let aggregated_checkpoint_and_full_content = if let Some(ref checkpoint_path) = rollback_checkpoint_path {
-            info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
+        
+        // // If we have a rollback checkpoint file, load and process it before starting checkpoint service
+        // let aggregated_checkpoint_and_full_content = if let Some(ref checkpoint_path) = rollback_checkpoint_path {
+        //     info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
             
-            // Load the aggregated checkpoint data
-            let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
-            let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
+        //     // Load the aggregated checkpoint data
+        //     let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
+        //     let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
             
-            info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
-                  aggregated.signatures.len(), aggregated.epoch);
+        //     info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
+        //           aggregated.signatures.len(), aggregated.epoch);
             
-            assert!(
-                aggregated.checkpoint.content_digest == aggregated.content.checkpoint_contents().digest().clone(), 
-                "Unmatched checkpoint content digest"
-            );
-            // Create a certified checkpoint from the aggregated data
-            // This is similar to how genesis processes the initial checkpoint
-            let committee = epoch_store.committee();
+        //     assert!(
+        //         aggregated.checkpoint.content_digest == aggregated.content.checkpoint_contents().digest().clone(), 
+        //         "Unmatched checkpoint content digest"
+        //     );
+        //     // Create a certified checkpoint from the aggregated data
+        //     // This is similar to how genesis processes the initial checkpoint
+        //     let committee = epoch_store.committee();
             
-            // Create the certified checkpoint with aggregated signatures
-            let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
-                aggregated.signatures,
-                committee,
-            )?;
+        //     // Create the certified checkpoint with aggregated signatures
+        //     let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
+        //         aggregated.signatures,
+        //         committee,
+        //     )?;
             
-            let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
-                aggregated.checkpoint.clone(),
-                quorum_signature,
-            );
+        //     let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
+        //         aggregated.checkpoint.clone(),
+        //         quorum_signature,
+        //     );
 
-            let full_contents = aggregated.content;
+        //     let full_contents = aggregated.content;
             
-            // Convert to VerifiedCheckpoint and insert into store
-            let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
+        //     // Convert to VerifiedCheckpoint and insert into store
+        //     let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
             
-            // Insert into checkpoint store tables
-            checkpoint_store.insert_checkpoint_contents(full_contents.checkpoint_contents().clone())?;
-            checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
+        //     // Insert into checkpoint store tables
+        //     checkpoint_store.insert_checkpoint_contents(full_contents.checkpoint_contents().clone())?;
+        //     checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
             
-            // CRITICAL: Insert into builder tables so CheckpointBuilder can find it
-            // This is what was missing and causing the fork detection error
-            if epoch_store.epoch() == aggregated.checkpoint.epoch {
-                info!("Inserting rollback checkpoint with {} transactions into builder tables for epoch {}", 
-                      full_contents.checkpoint_contents().size(), aggregated.checkpoint.epoch);
-                epoch_store.put_genesis_checkpoint_in_builder(&aggregated.checkpoint, &full_contents.checkpoint_contents())?;
-            }
+        //     // CRITICAL: Insert into builder tables so CheckpointBuilder can find it
+        //     // This is what was missing and causing the fork detection error
+        //     if epoch_store.epoch() == aggregated.checkpoint.epoch {
+        //         info!("Inserting rollback checkpoint with {} transactions into builder tables for epoch {}", 
+        //               full_contents.checkpoint_contents().size(), aggregated.checkpoint.epoch);
+        //         epoch_store.put_genesis_checkpoint_in_builder(&aggregated.checkpoint, &full_contents.checkpoint_contents())?;
+        //     }
             
-            // Update the watermarks to mark this checkpoint as synced and verified
-            checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
+        //     // Update the watermarks to mark this checkpoint as synced and verified
+        //     checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
             
-            // Also insert into certified_checkpoints table for consistency
-            // checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
+        //     // Also insert into certified_checkpoints table for consistency
+        //     // checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
             
-            info!("Successfully stored rollback checkpoint {} in all necessary tables", 
-                  verified_checkpoint.sequence_number());
+        //     info!("Successfully stored rollback checkpoint {} in all necessary tables", 
+        //           verified_checkpoint.sequence_number());
 
-            Some((aggregated.checkpoint, full_contents))
-        } else {
-            None
-        };
+        //     Some((aggregated.checkpoint, full_contents))
+        // } else {
+        //     None
+        // };
 
         let state_sync_store = RocksDbStore::new(
             store.clone(),
@@ -714,26 +715,26 @@ impl MgoNode {
                 .unwrap();
         }
 
-        if let Some(_) = rollback_checkpoint_path {
-            let (summary, full_content) = aggregated_checkpoint_and_full_content.unwrap();
-            let sequence_number = *summary.sequence_number();
-            let rollback_tx = full_content.iter().next().unwrap().transaction.clone();
-            let span = error_span!("rollback_txn", tx_digest = ?rollback_tx.digest());
+        // if let Some(_) = rollback_checkpoint_path {
+        //     let (summary, full_content) = aggregated_checkpoint_and_full_content.unwrap();
+        //     let sequence_number = *summary.sequence_number();
+        //     let rollback_tx = full_content.iter().next().unwrap().transaction.clone();
+        //     let span = error_span!("rollback_txn", tx_digest = ?rollback_tx.digest());
             
-            // No need for shared lock setup since RollbackPrologue doesn't use shared objects
-            let transaction =
-                VerifiedExecutableTransaction::new_unchecked(
-                    ExecutableTransaction::new_from_data_and_sig(
-                        rollback_tx.data().clone(),
-                        CertificateProof::Checkpoint(epoch_store.epoch(), sequence_number),
-                    ),
-                );
-            state
-                .try_execute_immediately(&transaction, None, &epoch_store)
-                .instrument(span)
-                .await
-                .unwrap();
-        }
+        //     // No need for shared lock setup since RollbackPrologue doesn't use shared objects
+        //     let transaction =
+        //         VerifiedExecutableTransaction::new_unchecked(
+        //             ExecutableTransaction::new_from_data_and_sig(
+        //                 rollback_tx.data().clone(),
+        //                 CertificateProof::Checkpoint(epoch_store.epoch(), sequence_number),
+        //             ),
+        //         );
+        //     state
+        //         .try_execute_immediately(&transaction, None, &epoch_store)
+        //         .instrument(span)
+        //         .await
+        //         .unwrap();
+        // }
 
         if config
             .expensive_safety_check_config

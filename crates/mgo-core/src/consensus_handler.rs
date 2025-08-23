@@ -257,9 +257,12 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
         };
 
         info!(
-            "Received consensus output {} at epoch {}",
+            "CONSENSUS_HANDLER: Received consensus output {} at epoch {}, round: {}, timestamp: {}, leader: {:?}",
             consensus_output,
             self.epoch_store.epoch(),
+            round,
+            timestamp,
+            leader_author,
         );
 
         let prologue_transaction = match self
