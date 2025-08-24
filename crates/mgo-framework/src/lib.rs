@@ -209,17 +209,103 @@ pub async fn compare_system_package<S: ObjectStore>(
         .data
         .try_as_package()
         .expect("Framework not package");
+    
+    // Print detailed package information
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Current package {} details: \n  - Object ID: {}\n  - Version: {}\n  - Previous Transaction: {:?}\n  - Storage Rebate: {}\n  - Module Count: {}\n  - Linkage Table Size: {}\n  - Type Origin Table Size: {}",
+        id,
+        cur_object.id(),
+        cur_object.version(),
+        cur_object.previous_transaction,
+        cur_object.storage_rebate,
+        cur_pkg.serialized_module_map().len(),
+        cur_pkg.linkage_table().len(),
+        cur_pkg.type_origin_table().len()
+    );
+    
+    // Print module names and sizes
+    let mut module_info = Vec::new();
+    for (name, module_bytes) in cur_pkg.serialized_module_map() {
+        module_info.push(format!("    - {}: {} bytes", name, module_bytes.len()));
+    }
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: Package {} modules:\n{}",
+        id,
+        module_info.join("\n")
+    );
+    
+    // Print first few bytes of each module for comparison
+    for (name, module_bytes) in cur_pkg.serialized_module_map() {
+        let preview_len = std::cmp::min(32, module_bytes.len());
+        let preview_bytes: Vec<String> = module_bytes[..preview_len]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        info!(
+            "COMPARE_SYSTEM_PACKAGE: Package {} module '{}' first {} bytes: {}",
+            id,
+            name,
+            preview_len,
+            preview_bytes.join(" ")
+        );
+    }
 
     let mut new_object = Object::new_system_package(
         modules,
         // Start at the same version as the current package, and increment if compatibility is
         // successful
         cur_object.version(),
-        dependencies,
+        dependencies.clone(),
         cur_object.previous_transaction,
     );
 
     let new_ref = new_object.compute_object_reference();
+    
+    // Print new package details for comparison
+    let new_pkg = new_object
+        .data
+        .try_as_package()
+        .expect("Created as package");
+    
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: New package {} details: \n  - Object ID: {}\n  - Version: {}\n  - Previous Transaction: {:?}\n  - Module Count: {}\n  - Dependencies: {:?}\n  - Linkage Table Size: {}\n  - Type Origin Table Size: {}",
+        id,
+        new_object.id(),
+        new_object.version(),
+        new_object.previous_transaction,
+        new_pkg.serialized_module_map().len(),
+        dependencies,
+        new_pkg.linkage_table().len(),
+        new_pkg.type_origin_table().len()
+    );
+    
+    // Print new module names and sizes from the package
+    let mut new_module_info = Vec::new();
+    for (name, module_bytes) in new_pkg.serialized_module_map() {
+        new_module_info.push(format!("    - {}: {} bytes", name, module_bytes.len()));
+    }
+    info!(
+        "COMPARE_SYSTEM_PACKAGE: New package {} modules:\n{}",
+        id,
+        new_module_info.join("\n")
+    );
+    
+    // Print first few bytes of each module for comparison
+    for (name, module_bytes) in new_pkg.serialized_module_map() {
+        let preview_len = std::cmp::min(32, module_bytes.len());
+        let preview_bytes: Vec<String> = module_bytes[..preview_len]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        info!(
+            "COMPARE_SYSTEM_PACKAGE: New package {} module '{}' first {} bytes: {}",
+            id,
+            name,
+            preview_len,
+            preview_bytes.join(" ")
+        );
+    }
+    
     if cur_ref == new_ref {
         info!(
             "COMPARE_SYSTEM_PACKAGE: Package {} unchanged, current and new references match: {:?}",
