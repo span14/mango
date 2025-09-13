@@ -79,6 +79,9 @@ impl Compatibility {
 
         // module's name and address are unchanged
         if old_module.address != new_module.address || old_module.name != new_module.name {
+            eprintln!("[COMPATIBILITY ERROR] Module name or address changed:");
+            eprintln!("  Old: {}::{}", old_module.address, old_module.name);
+            eprintln!("  New: {}::{}", new_module.address, new_module.name);
             struct_and_function_linking = false;
         }
 
@@ -88,6 +91,7 @@ impl Compatibility {
                 // Struct not present in new . Existing modules that depend on this struct will fail to link with the new version of the module.
                 // Also, struct layout cannot be guaranteed transitively, because after
                 // removing the struct, it could be re-added later with a different layout.
+                eprintln!("[COMPATIBILITY ERROR] Struct '{}' was removed from module", name);
                 struct_and_function_linking = false;
                 struct_layout = false;
                 break;
@@ -97,11 +101,18 @@ impl Compatibility {
                 self.disallowed_new_abilities,
                 old_struct.abilities,
                 new_struct.abilities,
-            ) || !struct_type_parameters_compatible(
+            ) {
+                eprintln!("[COMPATIBILITY ERROR] Struct '{}' abilities changed:", name);
+                eprintln!("  Old abilities: {:?}", old_struct.abilities);
+                eprintln!("  New abilities: {:?}", new_struct.abilities);
+                struct_and_function_linking = false;
+            }
+            if !struct_type_parameters_compatible(
                 self.disallow_change_struct_type_params,
                 &old_struct.type_parameters,
                 &new_struct.type_parameters,
             ) {
+                eprintln!("[COMPATIBILITY ERROR] Struct '{}' type parameters changed", name);
                 struct_and_function_linking = false;
             }
             if new_struct.fields != old_struct.fields {
@@ -111,6 +122,9 @@ impl Compatibility {
                 // choose that changing the name (but not position or type) of a field is
                 // compatible. The VM does not care about the name of a field
                 // (it's purely informational), but clients presumably do.
+                eprintln!("[COMPATIBILITY ERROR] Struct '{}' fields changed:", name);
+                eprintln!("  Old fields: {:?}", old_struct.fields);
+                eprintln!("  New fields: {:?}", new_struct.fields);
                 struct_layout = false
             }
         }
@@ -131,6 +145,9 @@ impl Compatibility {
         // we may revisit this in the future.
         for (name, old_func) in &old_module.functions {
             let Some(new_func) = new_module.functions.get(name) else {
+                eprintln!("[COMPATIBILITY ERROR] Function '{}' was removed from module", name);
+                eprintln!("  Function visibility: {:?}", old_func.visibility);
+                eprintln!("  Function is_entry: {}", old_func.is_entry);
                 if old_func.visibility == Visibility::Friend {
                     friend_linking = false;
                 } else if old_func.visibility != Visibility::Private {
@@ -146,9 +163,15 @@ impl Compatibility {
             // Check visibility compatibility
             match (old_func.visibility, new_func.visibility) {
                 (Visibility::Public, Visibility::Private | Visibility::Friend) => {
+                    eprintln!("[COMPATIBILITY ERROR] Function '{}' visibility downgraded:", name);
+                    eprintln!("  Old visibility: {:?}", old_func.visibility);
+                    eprintln!("  New visibility: {:?}", new_func.visibility);
                     struct_and_function_linking = false
                 }
-                (Visibility::Friend, Visibility::Private) => friend_linking = false,
+                (Visibility::Friend, Visibility::Private) => {
+                    eprintln!("[COMPATIBILITY ERROR] Function '{}' visibility downgraded from Friend to Private", name);
+                    friend_linking = false
+                },
                 _ => (),
             }
 
@@ -158,8 +181,10 @@ impl Compatibility {
                 && old_func.visibility != Visibility::Private
                 && old_func.is_entry != new_func.is_entry
             {
+                eprintln!("[COMPATIBILITY ERROR] Function '{}' entry status changed (pre-v5)", name);
                 entry_linking = false
             } else if old_func.is_entry && !new_func.is_entry {
+                eprintln!("[COMPATIBILITY ERROR] Function '{}' is no longer an entry function", name);
                 entry_linking = false;
             }
 
@@ -171,6 +196,20 @@ impl Compatibility {
                     &new_func.type_parameters,
                 )
             {
+                eprintln!("[COMPATIBILITY ERROR] Function '{}' signature changed:", name);
+                if old_func.parameters != new_func.parameters {
+                    eprintln!("  Parameters changed");
+                    eprintln!("    Old: {:?}", old_func.parameters);
+                    eprintln!("    New: {:?}", new_func.parameters);
+                }
+                if old_func.return_ != new_func.return_ {
+                    eprintln!("  Return type changed");
+                    eprintln!("    Old: {:?}", old_func.return_);
+                    eprintln!("    New: {:?}", new_func.return_);
+                }
+                if !fun_type_parameters_compatible(&old_func.type_parameters, &new_func.type_parameters) {
+                    eprintln!("  Type parameters incompatible");
+                }
                 match old_func.visibility {
                     Visibility::Friend => friend_linking = false,
                     Visibility::Public => struct_and_function_linking = false,
@@ -191,25 +230,32 @@ impl Compatibility {
         let old_friend_module_ids: BTreeSet<_> = old_module.friends.iter().cloned().collect();
         let new_friend_module_ids: BTreeSet<_> = new_module.friends.iter().cloned().collect();
         if !old_friend_module_ids.is_subset(&new_friend_module_ids) {
+            eprintln!("[COMPATIBILITY ERROR] Friend module declarations reduced:");
+            let removed_friends: BTreeSet<_> = old_friend_module_ids.difference(&new_friend_module_ids).collect();
+            eprintln!("  Removed friends: {:?}", removed_friends);
             friend_linking = false;
         }
 
         if self.check_struct_and_pub_function_linking && !struct_and_function_linking {
+            eprintln!("[COMPATIBILITY FAILURE] Struct and public function linking check failed");
             return Err(PartialVMError::new(
                 StatusCode::BACKWARD_INCOMPATIBLE_MODULE_UPDATE,
             ));
         }
         if self.check_struct_layout && !struct_layout {
+            eprintln!("[COMPATIBILITY FAILURE] Struct layout compatibility check failed");
             return Err(PartialVMError::new(
                 StatusCode::BACKWARD_INCOMPATIBLE_MODULE_UPDATE,
             ));
         }
         if self.check_friend_linking && !friend_linking {
+            eprintln!("[COMPATIBILITY FAILURE] Friend linking compatibility check failed");
             return Err(PartialVMError::new(
                 StatusCode::BACKWARD_INCOMPATIBLE_MODULE_UPDATE,
             ));
         }
         if self.check_private_entry_linking && !entry_linking {
+            eprintln!("[COMPATIBILITY FAILURE] Private entry linking compatibility check failed");
             return Err(PartialVMError::new(
                 StatusCode::BACKWARD_INCOMPATIBLE_MODULE_UPDATE,
             ));
