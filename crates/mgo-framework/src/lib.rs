@@ -11,7 +11,7 @@ use std::fmt::Formatter;
 use mgo_types::base_types::ObjectRef;
 use mgo_types::storage::ObjectStore;
 use mgo_types::{base_types::ObjectID, digests::TransactionDigest, move_package::MovePackage, object::{Object, OBJECT_START_VERSION}, MOVE_STDLIB_PACKAGE_ID, MGO_FRAMEWORK_PACKAGE_ID, MGO_SYSTEM_PACKAGE_ID, MGO_INSCRIPTION_PACKAGE_ID};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Represents a system package in the framework, that's built from the source code inside
 /// mgo-framework.
@@ -361,20 +361,45 @@ pub async fn compare_system_package<S: ObjectStore>(
         id, cur_normalized.len()
     );
 
-    for (name, cur_module) in cur_normalized {
-        let Some(new_module) = new_normalized.remove(&name) else {
-            error!("COMPARE_SYSTEM_PACKAGE: Module {name} missing in new package {id}");
-            return None;
-        };
+    let compatibility_check = cur_normalized
+        .iter()
+        .map(|(name, module)| {
+            let Some(new_module) = new_normalized.remove(name) else {
+                error!("COMPARE_SYSTEM_PACKAGE: Module {name} missing in new package {id}");
+                return None;
+            };
 
-        info!("COMPARE_SYSTEM_PACKAGE: Checking compatibility for module {id}::{name}");
-        if let Err(e) = compatibility.check(&cur_module, &new_module) {
-            error!("COMPARE_SYSTEM_PACKAGE: Compatibility check failed, for new version of {id}::{name}: {e:?}");
-            return None;
-        }
-        info!("COMPARE_SYSTEM_PACKAGE: Module {id}::{name} is compatible");
+            info!("COMPARE_SYSTEM_PACKAGE: Checking compatibility for module {id}::{name}");
+            if let Err(e) = compatibility.check(&module, &new_module) {
+                error!("COMPARE_SYSTEM_PACKAGE: Compatibility check failed, for new version of {id}::{name}: {e:?}");
+                return None;
+            }
+            info!("COMPARE_SYSTEM_PACKAGE: Module {id}::{name} is compatible");
+            Some(name)
+        })
+        .all(|x| x.is_some());
+
+
+    // for (name, cur_module) in cur_normalized {
+    //     let Some(new_module) = new_normalized.remove(&name) else {
+    //         error!("COMPARE_SYSTEM_PACKAGE: Module {name} missing in new package {id}");
+    //         return None;
+    //     };
+
+    //     info!("COMPARE_SYSTEM_PACKAGE: Checking compatibility for module {id}::{name}");
+    //     if let Err(e) = compatibility.check(&cur_module, &new_module) {
+    //         error!("COMPARE_SYSTEM_PACKAGE: Compatibility check failed, for new version of {id}::{name}: {e:?}");
+    //         return None;
+    //     }
+    //     info!("COMPARE_SYSTEM_PACKAGE: Module {id}::{name} is compatible");
+    // }
+    if !compatibility_check {
+        warn!(
+            "COMPARE_SYSTEM_PACKAGE: Package {} FAILED compatibility check - keeping existing on-chain version. Current: {:?}, Attempted: {:?}",
+            id, cur_ref, new_ref
+        );
+        return Some(cur_ref);
     }
-
     new_pkg.increment_version();
     let final_ref = new_object.compute_object_reference();
     info!(
@@ -382,4 +407,5 @@ pub async fn compare_system_package<S: ObjectStore>(
         id, new_object.version(), final_ref
     );
     Some(final_ref)
+
 }
