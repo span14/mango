@@ -91,9 +91,12 @@ impl<T: SubmitToConsensus + ReconfigurationInitiator> CheckpointOutput
             self.authority,
         );
 
+        // info!(
+        //     "CHECKPOINT_SUBMIT: Creating checkpoint signature for sequence {} by authority {:?}, digest: {:?}, epoch: {}",
+        //     checkpoint_seq, self.authority, summary.digest(), epoch_store.epoch()
+        // );
         info!(
-            "CHECKPOINT_SUBMIT: Creating checkpoint signature for sequence {} by authority {:?}, digest: {:?}, epoch: {}",
-            checkpoint_seq, self.authority, summary.digest(), epoch_store.epoch()
+            "CHECKPOINT_SUBMIT: Creating checkpoint: {:?}", summary
         );
 
         let message = CheckpointSignatureMessage { summary };
