@@ -2408,7 +2408,9 @@ impl AuthorityPerEpochStore {
                     commit_height: commit_round,
                 },
             };
-
+            info!(
+                "authority_per_epoch_store: Creating pending checkpoint: {:?}", pending_checkpoint
+            );
             self.write_pending_checkpoint(&mut batch, &pending_checkpoint)?;
             checkpoint_service.notify_checkpoint(&pending_checkpoint)?;
         }

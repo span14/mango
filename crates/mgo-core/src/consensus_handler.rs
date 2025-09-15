@@ -448,7 +448,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
             }
         }
         info!(
-            "CONSENSUS_HANDLER: Processing transactions: {:?}", all_transactions
+            "CONSENSUS_HANDLER: Processing transactions: {:?}", all_transactions.iter().map(|t| t.key()).collect::<Vec<_>>()
         );
         let transactions_to_schedule = self
             .epoch_store
