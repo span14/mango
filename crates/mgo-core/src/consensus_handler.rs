@@ -447,7 +447,9 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                 all_transactions.push(sequenced_transaction);
             }
         }
-
+        info!(
+            "CONSENSUS_HANDLER: Processing transactions: {:?}", all_transactions
+        );
         let transactions_to_schedule = self
             .epoch_store
             .process_consensus_transactions_and_commit_boundary(
