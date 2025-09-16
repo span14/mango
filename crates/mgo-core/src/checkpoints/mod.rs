@@ -968,6 +968,9 @@ impl CheckpointBuilder {
                     checkpoint_commit_height = height,
                     "Making checkpoint at commit height"
                 );
+                info!(
+                    "CheckpointBuilder: making checkpoint from: {:?}", pending,
+                );
                 if let Err(e) = self.make_checkpoint(height, pending).await {
                     error!("Error while making checkpoint, will retry in 1s: {:?}", e);
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1001,6 +1004,9 @@ impl CheckpointBuilder {
             .notify_read_executed_effects(pending.roots)
             .in_monitored_scope("CheckpointNotifyRead")
             .await?;
+        info!(
+            "CheckpointBuilder: checkpoint effects: {:?}", roots
+        );
         let _scope = monitored_scope("CheckpointBuilder");
         let unsorted = self.complete_checkpoint_effects(roots)?;
         let sorted = {
