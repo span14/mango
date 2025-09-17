@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::IDOperation;
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
-pub struct  {
+pub struct EffectsObjectChange {
     // input_state and output_state are the core fields that's required by
     // the protocol as it tells how an object changes on-chain.
     /// State of the object in the store prior to this transaction.
@@ -25,7 +25,7 @@ pub struct  {
     pub(crate) id_operation: IDOperation,
 }
 
-impl  {
+impl EffectsObjectChange {
     pub fn new(
         modified_at: Option<(VersionDigest, Owner)>,
         written: Option<&Object>,
