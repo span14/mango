@@ -548,10 +548,26 @@ impl AuthorityPerpetualTables {
             batch.schedule_delete_range(&self.root_state_hash_by_epoch, &target_epoch, &(max_epoch+1))?;
             info!("Added {} of root state hashes to remove", max_epoch + 1 - target_epoch);
         }
+
+        
+        // TOREMOVE
+        let transaction_digests_brute_force = self.effects
+            .unbounded_iter()
+            .filter(|te| te.1.executed_epoch() >= target_epoch)
+            .map(|te| te.1.transaction_digest().clone())
+            .collect::<Vec<_>>();
+
+        let transactions_to_remove = transaction_digests_brute_force
+            .into_iter()
+            .chain(transactions_to_remove.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // TOREMOVE
         
         // Remove transactions to checkpoint
         let transaction_effect_digests_to_remove = self.executed_effects
-            .multi_get(transactions_to_remove)?
+            .multi_get(&transactions_to_remove)?
             .into_iter()
             .filter(|te| te.is_some())
             .map(|te| te.unwrap())
