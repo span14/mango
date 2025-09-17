@@ -673,7 +673,7 @@ impl CheckpointStore {
     }
 
     /// Rollback checkpoint store to target epoch by removing all checkpoints after the target epoch's last checkpoint
-    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<(Vec<TransactionDigest>, Vec<TransactionEffectsDigest>, DBBatch)> {
+    pub fn rollback_to_epoch(&self, target_epoch: EpochId) -> MgoResult<(Vec<TransactionDigest>, DBBatch)> {
         info!("Rolling back CheckpointStore to beginning of epoch {}", target_epoch);
         let mut batch = self.checkpoint_content.batch();
         // For rollback to beginning of epoch N, we need to find the last checkpoint of epoch N-1
@@ -714,17 +714,14 @@ impl CheckpointStore {
             )
             .unzip();
 
-        let (
-            certified_transaction_digests_to_remove, 
-            certified_transaction_effect_digests_to_remove
-        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = self.checkpoint_content
+        let certified_transaction_digests_to_remove: Vec<TransactionDigest> = self.checkpoint_content
             .multi_get(&certified_checkpoint_content_digest_to_remove)?
             .into_iter()
             .filter(|c| c.is_some())
             .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
             .flatten()
-            .map(| ed | (ed.transaction, ed.effects))
-            .unzip();
+            .map(| ed | ed.transaction);
+            
         
         assert!(max_certified_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.certified_checkpoints, &(target_seq+1), &(max_certified_checkpoint+1))?;
@@ -751,18 +748,14 @@ impl CheckpointStore {
             .map(|checkpoint| checkpoint.checkpoint_contents().digest().clone())
             .collect::<Vec<_>>();
 
-        let (
-            state_synced_execution_digests_to_remove,
-            state_synced_effect_digests_to_remove,
-        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = state_synced_checkpoint_to_remove
+        let state_synced_execution_digests_to_remove: Vec<TransactionDigest> = state_synced_checkpoint_to_remove
             .iter()
             .map(|checkpoint| {
                 checkpoint.checkpoint_contents().iter().cloned().collect::<Vec<_>>()
             })
             .flatten()
-            .map(|ed| (ed.transaction, ed.effects))
-            .unzip();
-        
+            .map(|ed| ed.transaction);
+
         assert!(max_state_synced_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
         info!("Added {} state synced checkpoints to remove", state_synced_checkpoint_to_remove.len());
@@ -785,17 +778,13 @@ impl CheckpointStore {
             .map(|checkpoint| checkpoint.content_digest)
             .collect::<Vec<_>>();
         
-        let (
-            locally_computed_execution_digests_to_remove,
-            locally_computed_effect_digests_to_remove,
-        ): (Vec<TransactionDigest>, Vec<TransactionEffectsDigest>) = self.checkpoint_content
+        let locally_computed_execution_digests_to_remove: Vec<TransactionDigest> = self.checkpoint_content
             .multi_get(&locally_computed_checkpoint_content_digests_to_remove)?
             .into_iter()
             .filter(|c| c.is_some())
             .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
             .flatten()
-            .map(| ed | (ed.transaction, ed.effects))
-            .unzip();
+            .map(| ed | ed.transaction);
 
         assert!(max_locally_computed_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
@@ -849,14 +838,7 @@ impl CheckpointStore {
                 .chain(locally_computed_execution_digests_to_remove.into_iter())
         ).into_iter().collect::<Vec<_>>();
         
-        let combined_effects_digest = HashSet::<TransactionEffectsDigest>::from_iter(
-            certified_transaction_effect_digests_to_remove
-                .into_iter()
-                .chain(state_synced_effect_digests_to_remove.into_iter())
-                .chain(locally_computed_effect_digests_to_remove.into_iter())
-        ).into_iter().collect::<Vec<_>>();
-        
-        Ok((combined_transaction_digest, combined_effects_digest, batch))
+        Ok((combined_transaction_digest, batch))
     }
 
     pub fn reset_db_for_execution_since_genesis(&self) -> MgoResult {

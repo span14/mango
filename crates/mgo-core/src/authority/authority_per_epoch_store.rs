@@ -875,6 +875,23 @@ impl AuthorityPerEpochStore {
         Ok(())
     }
 
+    pub fn collect_deprecated_tx_by_epoch(&self, target_epoch: EpochId) -> Vec<TransactionDigest> {
+        let mut txns = Vec::new();
+        for epoch in target_epoch..(target_epoch+1000) {
+            let epoch_path = AuthorityEpochTables::path(epoch, parent_path);
+            if epoch_path.exists() {
+                let tables = AuthorityEpochTables::open_readonly(epoch, parent_path);
+                txns.extend(tables
+                    .effects_signatures
+                    .unbounded_iter()
+                    .map(|txn| txn.0)
+                    .collect::<Vec<_>>()
+                );
+            }
+        }
+        txns
+    }
+
     pub fn tables(&self) -> MgoResult<Arc<AuthorityEpochTables>> {
         match self.tables.load_full() {
             Some(tables) => Ok(tables),

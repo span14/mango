@@ -996,20 +996,33 @@ impl MgoNode {
                 config.network_address = addresses.mgo_net_address.clone();
                 config.p2p_config.external_address = Some(addresses.p2p_address.clone());
             });
-        }     
+        }
 
         let committee_batch = CommitteeStore::restore_committee(
             config.db_path().join("epochs"), 
             epoch_id, 
             None
         )?; 
+        // It should collect most transactions from checkpoints
         let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
         let (
-            transaction_digests_to_remove, 
-            transaction_effect_digests_to_remove,
+            transaction_digests_to_remove_from_checkpoint_store, 
             checkpoint_batch
         ) = 
             checkpoint_store.rollback_to_epoch(epoch_id)?;
+
+        let transaction_digests_to_remove_from_per_epoch_tables = AuthorityPerEpochStore::collect_deprecated_tx_by_epoch(
+            &config.db_path().join("store"),
+            epoch_id
+        );
+
+        let transaction_digests_to_remove = transaction_digests_to_remove_from_checkpoint_store
+            .into_iter()
+            .chain(transaction_digests_to_remove_from_per_epoch_tables)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        
         let perpetual_options = default_db_options().optimize_db_for_write_throughput(4);
         let perpetual_tables = Arc::new(AuthorityPerpetualTables::open(
             &config.db_path().join("store"),
@@ -1018,8 +1031,7 @@ impl MgoNode {
         let perpetual_batch = perpetual_tables.rollback_to_epoch(
             epoch_id, 
             &checkpoint_store,
-            &transaction_digests_to_remove, 
-            &transaction_effect_digests_to_remove,
+            &transaction_digests_to_remove,
         )?;
 
         committee_batch.write()?;
