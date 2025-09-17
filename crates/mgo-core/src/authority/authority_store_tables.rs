@@ -564,13 +564,13 @@ impl AuthorityPerpetualTables {
 
         // Remove transaction_effects
         let transaction_effects_to_clean = self.effects
-            .multi_get(transaction_effect_digests_to_remove)?
+            .multi_get(&transaction_effect_digests_to_remove)?
             .into_iter()
             .filter(|te| te.is_some())
             .map(|te| te.unwrap())
             .collect::<Vec<_>>();
 
-        batch.delete_batch(&self.effects, transaction_effects_to_remove.iter())?;
+        batch.delete_batch(&self.effects, transaction_effect_digests_to_remove.iter())?;
         info!("Added {} of transaction effects to remove", transaction_effects_to_clean.len());
         
         // Remove events

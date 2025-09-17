@@ -875,7 +875,7 @@ impl AuthorityPerEpochStore {
         Ok(())
     }
 
-    pub fn collect_deprecated_tx_by_epoch(&self, target_epoch: EpochId) -> Vec<TransactionDigest> {
+    pub fn collect_deprecated_tx_by_epoch(parent_path: &Path, target_epoch: EpochId) -> Vec<TransactionDigest> {
         let mut txns = Vec::new();
         for epoch in target_epoch..(target_epoch+1000) {
             let epoch_path = AuthorityEpochTables::path(epoch, parent_path);

@@ -720,7 +720,8 @@ impl CheckpointStore {
             .filter(|c| c.is_some())
             .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
             .flatten()
-            .map(| ed | ed.transaction);
+            .map(| ed | ed.transaction)
+            .collect();
             
         
         assert!(max_certified_checkpoint+1 >= target_seq+1);
@@ -754,7 +755,8 @@ impl CheckpointStore {
                 checkpoint.checkpoint_contents().iter().cloned().collect::<Vec<_>>()
             })
             .flatten()
-            .map(|ed| ed.transaction);
+            .map(|ed| ed.transaction)
+            .collect();
 
         assert!(max_state_synced_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
@@ -784,7 +786,8 @@ impl CheckpointStore {
             .filter(|c| c.is_some())
             .map(|c| c.unwrap().iter().cloned().collect::<Vec<_>>())
             .flatten()
-            .map(| ed | ed.transaction);
+            .map(| ed | ed.transaction)
+            .collect();
 
         assert!(max_locally_computed_checkpoint+1 >= target_seq+1);
         batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
