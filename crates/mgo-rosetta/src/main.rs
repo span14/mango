@@ -170,7 +170,7 @@ impl RosettaServerCommand {
                     mango_metrics::start_prometheus_server(config.metrics_address);
                 // Staring a full node for the rosetta server.
                 let rpc_address = format!("http://127.0.0.1:{}", config.json_rpc_address.port());
-                let _node = MgoNode::start(&config, registry_service, None, None).await?;
+                let _node = MgoNode::start(&config, registry_service, None).await?;
 
                 let mgo_client = wait_for_mgo_client(rpc_address).await;
 

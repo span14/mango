@@ -42,7 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use mgo_protocol_config::ProtocolVersion;
-use mgo_types::base_types::{AuthorityName, EpochId, TransactionDigest, TransactionEffectsDigest};
+use mgo_types::base_types::{AuthorityName, EpochId, TransactionDigest};
 use mgo_types::committee::StakeUnit;
 use mgo_types::crypto::AuthorityStrongQuorumSignInfo;
 use mgo_types::digests::{CheckpointContentsDigest, CheckpointDigest};

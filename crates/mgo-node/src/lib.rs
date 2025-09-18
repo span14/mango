@@ -37,7 +37,7 @@ use mgo_core::authority::CHAIN_IDENTIFIER;
 use mgo_core::consensus_adapter::SubmitToConsensus;
 use mgo_core::epoch::randomness::RandomnessManager;
 use mgo_json_rpc_api::JsonRpcMetrics;
-use mgo_types::base_types::{ConciseableName, ExecutionDigests};
+use mgo_types::base_types::ConciseableName;
 use mgo_types::digests::ChainIdentifier;
 use mgo_types::message_envelope::get_google_jwk_bytes;
 use mgo_types::mgo_system_state::MgoSystemState;
@@ -62,7 +62,7 @@ use mgo_config::node::{ConsensusProtocol, DBCheckpointConfig, RunWithRange};
 use mgo_config::node_config_metrics::NodeConfigMetrics;
 use mgo_config::object_storage_config::{ObjectStoreConfig, ObjectStoreType};
 use mgo_config::{ConsensusConfig, NodeConfig};
-use mgo_core::authority::authority_per_epoch_store::AuthorityPerEpochStore;
+use mgo_core::authority::authority_per_epoch_store::{AuthorityPerEpochStore, AuthorityEpochTables};
 use mgo_core::authority::authority_store_tables::AuthorityPerpetualTables;
 use mgo_core::authority::epoch_start_configuration::EpochStartConfigTrait;
 use mgo_core::authority::epoch_start_configuration::EpochStartConfiguration;
@@ -117,20 +117,15 @@ use mgo_storage::{
     key_value_store_metrics::KeyValueStoreMetrics,
 };
 use mgo_storage::{FileCompression, IndexStore, StorageFormat};
-use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress, ExecutionData};
+use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress};
 use mgo_types::multiaddr::Multiaddr;
 use mgo_types::committee::Committee;
-use mgo_types::crypto::{AuthoritySignInfo, AuthoritySignature, KeypairTraits, MgoAuthoritySignature};
+use mgo_types::crypto::{AuthoritySignInfo, KeypairTraits};
 use mgo_types::error::{MgoError, MgoResult};
 use mgo_types::executable_transaction::{CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction, };
-use mgo_types::transaction::{VerifiedTransaction};
 use mgo_types::messages_checkpoint::{
-    CertifiedCheckpointSummary, CheckpointContents, CheckpointSummary, 
-    CheckpointSequenceNumber, CheckpointDigest, CheckpointTimestamp, FullCheckpointContents, VerifiedCheckpoint,
+    CheckpointSummary, FullCheckpointContents,
 };
-use mgo_types::effects::TransactionEffects;
-use mgo_types::message_envelope::Message;
-use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
 use mgo_types::messages_consensus::{
     check_total_jwk_size, AuthorityCapabilities, ConsensusTransaction,
 };
@@ -283,9 +278,8 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
-        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<Arc<MgoNode>> {
-        Self::start_async(config, registry_service, custom_rpc_runtime, rollback_checkpoint_path).await
+        Self::start_async(config, registry_service, custom_rpc_runtime).await
     }
 
     fn start_jwk_updater(
@@ -427,7 +421,6 @@ impl MgoNode {
         config: &NodeConfig,
         registry_service: RegistryService,
         custom_rpc_runtime: Option<Handle>,
-        rollback_checkpoint_path: Option<PathBuf>
     ) -> Result<Arc<MgoNode>> {
         NodeConfigMetrics::new(&registry_service.default_registry()).record_metrics(config);
         let mut config = config.clone();
@@ -543,67 +536,6 @@ impl MgoNode {
             &epoch_store,
         );
 
-        // // If we have a rollback checkpoint file, load and process it before starting checkpoint service
-        // let aggregated_checkpoint_and_full_content = if let Some(ref checkpoint_path) = rollback_checkpoint_path {
-        //     info!("Loading rollback checkpoint from: {:?}", checkpoint_path);
-            
-        //     // Load the aggregated checkpoint data
-        //     let checkpoint_data = std::fs::read_to_string(checkpoint_path)?;
-        //     let aggregated: RollbackCheckpointAggregation = serde_json::from_str(&checkpoint_data)?;
-            
-        //     info!("Loaded rollback checkpoint with {} signatures for epoch {}", 
-        //           aggregated.signatures.len(), aggregated.epoch);
-            
-        //     assert!(
-        //         aggregated.checkpoint.content_digest == aggregated.content.checkpoint_contents().digest().clone(), 
-        //         "Unmatched checkpoint content digest"
-        //     );
-        //     // Create a certified checkpoint from the aggregated data
-        //     // This is similar to how genesis processes the initial checkpoint
-        //     let committee = epoch_store.committee();
-            
-        //     // Create the certified checkpoint with aggregated signatures
-        //     let quorum_signature = mgo_types::crypto::AuthorityQuorumSignInfo::<true>::new_from_auth_sign_infos(
-        //         aggregated.signatures,
-        //         committee,
-        //     )?;
-            
-        //     let certified_checkpoint = CertifiedCheckpointSummary::new_from_data_and_sig(
-        //         aggregated.checkpoint.clone(),
-        //         quorum_signature,
-        //     );
-
-        //     let full_contents = aggregated.content;
-            
-        //     // Convert to VerifiedCheckpoint and insert into store
-        //     let verified_checkpoint = VerifiedCheckpoint::new_unchecked(certified_checkpoint);
-            
-        //     // Insert into checkpoint store tables
-        //     checkpoint_store.insert_checkpoint_contents(full_contents.checkpoint_contents().clone())?;
-        //     checkpoint_store.insert_verified_checkpoint(&verified_checkpoint)?;
-            
-        //     // CRITICAL: Insert into builder tables so CheckpointBuilder can find it
-        //     // This is what was missing and causing the fork detection error
-        //     if epoch_store.epoch() == aggregated.checkpoint.epoch {
-        //         info!("Inserting rollback checkpoint with {} transactions into builder tables for epoch {}", 
-        //               full_contents.checkpoint_contents().size(), aggregated.checkpoint.epoch);
-        //         epoch_store.put_genesis_checkpoint_in_builder(&aggregated.checkpoint, &full_contents.checkpoint_contents())?;
-        //     }
-            
-        //     // Update the watermarks to mark this checkpoint as synced and verified
-        //     checkpoint_store.update_highest_synced_checkpoint(&verified_checkpoint)?;
-            
-        //     // Also insert into certified_checkpoints table for consistency
-        //     // checkpoint_store.insert_certified_checkpoint(&verified_checkpoint)?;
-            
-        //     info!("Successfully stored rollback checkpoint {} in all necessary tables", 
-        //           verified_checkpoint.sequence_number());
-
-        //     Some((aggregated.checkpoint, full_contents))
-        // } else {
-        //     None
-        // };
-
         let state_sync_store = RocksDbStore::new(
             store.clone(),
             execution_cache.clone(),
@@ -716,27 +648,6 @@ impl MgoNode {
                 .await
                 .unwrap();
         }
-
-        // if let Some(_) = rollback_checkpoint_path {
-        //     let (summary, full_content) = aggregated_checkpoint_and_full_content.unwrap();
-        //     let sequence_number = *summary.sequence_number();
-        //     let rollback_tx = full_content.iter().next().unwrap().transaction.clone();
-        //     let span = error_span!("rollback_txn", tx_digest = ?rollback_tx.digest());
-            
-        //     // No need for shared lock setup since RollbackPrologue doesn't use shared objects
-        //     let transaction =
-        //         VerifiedExecutableTransaction::new_unchecked(
-        //             ExecutableTransaction::new_from_data_and_sig(
-        //                 rollback_tx.data().clone(),
-        //                 CertificateProof::Checkpoint(epoch_store.epoch(), sequence_number),
-        //             ),
-        //         );
-        //     state
-        //         .try_execute_immediately(&transaction, None, &epoch_store)
-        //         .instrument(span)
-        //         .await
-        //         .unwrap();
-        // }
 
         if config
             .expensive_safety_check_config
@@ -860,127 +771,10 @@ impl MgoNode {
         Ok(node)
     }
 
-    fn create_rollback_checkpoint_contents(
-        epoch_id: EpochId, 
-        checkpoint_sequence_number: CheckpointSequenceNumber,
-    ) -> FullCheckpointContents {
-        // Create a RollbackPrologue transaction to mark rollback initialization
-        let rollback_tx = VerifiedTransaction::new_rollback_prologue(
-            epoch_id,
-            checkpoint_sequence_number,
-        );
-        
-        // Create effects for the rollback transaction
-        // Using a minimal effects object for the system transaction
-        let effects = TransactionEffects::new_with_tx(&rollback_tx);
-        let execution_digests = ExecutionDigests::new(
-            *rollback_tx.digest(),
-            effects.digest(),
-        );
-
-        // Create checkpoint contents with the rollback transaction
-        let checkpoint_contents = CheckpointContents::new_with_digests_and_signatures(
-            vec![execution_digests],
-            vec![vec![]], // System transactions have empty signatures
-        );
-
-        FullCheckpointContents::from_contents_and_execution_data(
-            checkpoint_contents, 
-            vec![ExecutionData::new(rollback_tx.into(), effects)].into_iter(),
-        )
-
-    }
-
-    // Helper functions for rollback checkpoint creation and signing
-    fn create_rollback_checkpoint(
-        epoch_id: EpochId, 
-        checkpoint_sequence: CheckpointSequenceNumber,
-        previous_digest: CheckpointDigest,
-        created_timestamp_ms: CheckpointTimestamp,
-    ) -> (CheckpointSummary, FullCheckpointContents) {
-        
-        let full_checkpoint_content = Self::create_rollback_checkpoint_contents(epoch_id, checkpoint_sequence);
-        println!("Checkpoint Content is: {:?} with hash: {}", full_checkpoint_content, full_checkpoint_content.checkpoint_contents().digest());
-        // Create checkpoint summary with the rollback transaction
-        let checkpoint = CheckpointSummary::new(
-            epoch_id,
-            checkpoint_sequence,
-            1, // 1 transaction (the rollback prologue)
-            &full_checkpoint_content.checkpoint_contents(),
-            Some(previous_digest),
-            Default::default(), // empty gas cost summary
-            None, // no end of epoch data
-            created_timestamp_ms,
-        );
-        
-        (checkpoint, full_checkpoint_content)
-    }
-    
-    fn sign_rollback_checkpoint(
-        checkpoint: &CheckpointSummary,
-        config: &NodeConfig,
-    ) -> AuthoritySignInfo {
-        let authority_name = config.protocol_public_key();
-        let secret = config.protocol_key_pair();
-        
-        let intent_msg = IntentMessage::new(
-            Intent::mgo_app(IntentScope::CheckpointSummary),
-            checkpoint,
-        );
-        
-        let signature = AuthoritySignature::new_secure(
-            &intent_msg,
-            &checkpoint.epoch,
-            secret,
-        );
-        
-        AuthoritySignInfo {
-            epoch: checkpoint.epoch,
-            authority: authority_name,
-            signature,
-        }
-    }
-    
-    fn export_signed_checkpoint(
-        checkpoint: &CheckpointSummary,
-        signed_checkpoint: &AuthoritySignInfo,
-        checkpoint_content: &FullCheckpointContents,
-        rollback_checkpoint_dir: &PathBuf,
-        epoch_id: EpochId,
-    ) -> Result<()> {
-        use std::fs;
-        use std::io::Write;
-        #[derive(Serialize, Deserialize)]
-        struct RollbackCheckpointData {
-            checkpoint: CheckpointSummary,
-            signature: AuthoritySignInfo,
-            content: FullCheckpointContents,
-        }
-        
-        let authority_hex = format!("{:10}", signed_checkpoint.authority);
-        let filename = format!("rollback_checkpoint_epoch_{}_authority_{}.json", epoch_id, authority_hex);
-        let file_path = rollback_checkpoint_dir.join(&filename);
-        
-        let data = RollbackCheckpointData {
-            checkpoint: checkpoint.clone(),
-            signature: signed_checkpoint.clone(),
-            content: checkpoint_content.clone(),
-        };
-        
-        let json_data = serde_json::to_string_pretty(&data)?;
-        
-        let mut file = fs::File::create(&file_path)?;
-        file.write_all(json_data.as_bytes())?;
-        
-        info!("Exported rollback checkpoint and signature to: {:?}", file_path);
-        Ok(())
-    }
-
     pub async fn rollback_by_epoch_async(
         config: &NodeConfig,
         epoch_id: EpochId,
         network_address_overrides: Option<HashMap<MgoAddress, NetworkAddressOverride>>,
-        rollback_checkpoint_dir: PathBuf,
     ) -> Result<()> {
         let mut config = config.clone();
         if config.supported_protocol_versions.is_none() {
@@ -997,12 +791,15 @@ impl MgoNode {
                 config.p2p_config.external_address = Some(addresses.p2p_address.clone());
             });
         }
-
+        let epoch_path = AuthorityEpochTables::path(epoch_id, &config.db_path().join("store"));
+        if !epoch_path.exists() {
+            return Err(MgoError::Rollback("Cannot rollback too far".to_string()).into());
+        }
         let committee_batch = CommitteeStore::restore_committee(
             config.db_path().join("epochs"), 
             epoch_id, 
             None
-        )?; 
+        )?;
         // It should collect most transactions from checkpoints
         let checkpoint_store = CheckpointStore::new(&config.db_path().join("checkpoints"));
         let (
@@ -1055,52 +852,27 @@ impl MgoNode {
             epoch_id,
         )?;
 
-        // If the node is validator
-        if config.consensus_config().is_some() {
-            let base_consensus_path = config.consensus_config().unwrap().db_path();
-            let mut epochs_to_remove = vec![];
-            for epoch in epoch_id..(epoch_id + 1000) {
-                epochs_to_remove.push((epoch, base_consensus_path.join(format!("{}", epoch))));
-            }
-
-            // Now destroy each database in consensus database
-            for (epoch, path) in epochs_to_remove {
-                info!("Destroying ConsensusDB for epoch {} at path {:?}", epoch, path);
-                match safe_drop_db(path) {
-                    Ok(()) => info!("Successfully destroyed database for epoch {}", epoch),
-                    Err(e) => {
-                        error!("Failed to destroy database for epoch {}: {}", epoch, e);
-                        return Err(Error::msg(format!(
-                            "Failed to destroy epoch {} database: {}",
-                            epoch, e
-                        )));
-                    }
-                }
-            }
-
+        let base_consensus_path = config.consensus_config().unwrap().db_path();
+        let mut epochs_to_remove = vec![];
+        for epoch in epoch_id..(epoch_id + 1000) {
+            epochs_to_remove.push((epoch, base_consensus_path.join(format!("{}", epoch))));
         }
 
+        // Now destroy each database in consensus database
+        for (epoch, path) in epochs_to_remove {
+            info!("Destroying ConsensusDB for epoch {} at path {:?}", epoch, path);
+            match safe_drop_db(path) {
+                Ok(()) => info!("Successfully destroyed database for epoch {}", epoch),
+                Err(e) => {
+                    error!("Failed to destroy database for epoch {}: {}", epoch, e);
+                    return Err(Error::msg(format!(
+                        "Failed to destroy epoch {} database: {}",
+                        epoch, e
+                    )));
+                }
+            }
+        }
 
-
-        let latest_checkpoint = checkpoint_store.get_epoch_last_checkpoint(epoch_id-1)?.unwrap().into_inner();
-
-        // Create and sign rollback checkpoint with bootstrap transaction
-        let (rollback_checkpoint, rollback_checkpoint_content) = Self::create_rollback_checkpoint(
-            epoch_id,
-            latest_checkpoint.sequence_number() + 1,
-            latest_checkpoint.digest().clone(),
-            epoch_start_state.epoch_start_timestamp_ms(),
-        );
-        let signed_checkpoint = Self::sign_rollback_checkpoint(&rollback_checkpoint, &config);
-        
-        // Export checkpoint and contents separately for aggregation
-        Self::export_signed_checkpoint(
-            &rollback_checkpoint, 
-            &signed_checkpoint, 
-            &rollback_checkpoint_content, 
-            &rollback_checkpoint_dir, 
-            epoch_id
-        )?;
 
         Ok(())
 

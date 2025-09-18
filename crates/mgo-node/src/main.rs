@@ -60,14 +60,9 @@ struct Args {
     #[clap(long, group = "exclusive", help = "Rollback to a specific epoch")]
     rollback_to_epoch: Option<EpochId>,
 
-    #[clap(long, requires = "rollback_to_epoch", help = "Output location of the rollback checkpoint file")]
-    rollback_checkpoint_dir: Option<PathBuf>,
-
     #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
     network_overrides_file: Option<PathBuf>,
-    
-    #[clap(long, help = "Path to rollback checkpoint file containing aggregated signatures")]
-    rollback_checkpoint_file: Option<PathBuf>,
+
 }
 
 fn main() {
@@ -146,7 +141,6 @@ fn main() {
                 &config, 
                 epoch_id, 
                 network_overrides,
-                args.rollback_checkpoint_dir.unwrap(),
             )
                 .await
                 .expect("Rollback failed");
@@ -183,7 +177,6 @@ fn main() {
             &config, 
             registry_service, 
             Some(rpc_runtime),
-            args.rollback_checkpoint_file,
         ).await {
             Ok(mgo_node) => node_once_cell_clone
                 .set(mgo_node)
