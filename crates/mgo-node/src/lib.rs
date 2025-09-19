@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use anyhow::Error;
 use anyhow::Result;
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use fastcrypto_zkp::bn254::zk_login::JwkId;
 use fastcrypto_zkp::bn254::zk_login::OIDCProvider;
 use futures::TryFutureExt;
@@ -39,7 +40,7 @@ use mgo_core::epoch::randomness::RandomnessManager;
 use mgo_json_rpc_api::JsonRpcMetrics;
 use mgo_types::base_types::ConciseableName;
 use mgo_types::digests::ChainIdentifier;
-use mgo_types::message_envelope::get_google_jwk_bytes;
+use mgo_types::message_envelope::{get_google_jwk_bytes, Message};
 use mgo_types::mgo_system_state::MgoSystemState;
 use tap::tap::TapFallible;
 use tokio::runtime::Handle;
@@ -119,7 +120,7 @@ use mgo_storage::{
 use mgo_storage::{FileCompression, IndexStore, StorageFormat};
 use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress};
 use mgo_types::multiaddr::Multiaddr;
-use mgo_types::committee::Committee;
+use mgo_types::committee::{Committee, StakeUnit};
 use mgo_types::crypto::{AuthoritySignInfo, KeypairTraits};
 use mgo_types::error::{MgoError, MgoResult};
 use mgo_types::executable_transaction::{CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction, };
@@ -130,8 +131,7 @@ use mgo_types::messages_consensus::{
     check_total_jwk_size, AuthorityCapabilities, ConsensusTransaction,
 };
 use mgo_types::quorum_driver_types::QuorumDriverEffectsQueueResult;
-use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemState;
-use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemStateTrait;
+use mgo_types::mgo_system_state::epoch_start_mgo_system_state::{EpochStartSystemState, EpochStartValidatorInfoV1, EpochStartSystemStateTrait};
 use mgo_types::mgo_system_state::MgoSystemStateTrait;
 use typed_store::rocks::{default_db_options, safe_drop_db};
 use typed_store::DBMetrics;
@@ -141,6 +141,32 @@ use crate::metrics::{GrpcMetrics, MgoNodeMetrics};
 pub mod admin;
 mod handle;
 pub mod metrics;
+
+/// Optional YAML configuration for epoch state overrides during rollback
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EpochStateOverride {
+    pub epoch: EpochId,
+    pub protocol_version: Option<u64>,
+    pub reference_gas_price: Option<u64>,
+    pub safe_mode: Option<bool>,
+    pub epoch_duration_ms: Option<u64>,
+    pub active_validators: Option<Vec<EpochStartValidatorInfoV1>>,
+}
+
+/// Optional validator configuration overrides
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorOverride {
+    pub mgo_address: String,
+    pub protocol_pubkey: String,
+    pub narwhal_network_pubkey: String,
+    pub narwhal_worker_pubkey: String,
+    pub mgo_net_address: String,
+    pub p2p_address: String,
+    pub narwhal_primary_address: String,
+    pub narwhal_worker_address: String,
+    pub voting_power: StakeUnit,
+    pub hostname: String,
+}
 
 /// Network address overrides for rollback operations
 /// Allows updating validator network addresses during epoch rollback
@@ -773,8 +799,7 @@ impl MgoNode {
 
     pub async fn rollback_by_epoch_async(
         config: &NodeConfig,
-        epoch_id: EpochId,
-        network_address_overrides: Option<HashMap<MgoAddress, NetworkAddressOverride>>,
+        epoch_state_overrides: &EpochStateOverride,
     ) -> Result<()> {
         let mut config = config.clone();
         if config.supported_protocol_versions.is_none() {
@@ -785,12 +810,18 @@ impl MgoNode {
             config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
         }
         let node_address: MgoAddress = MgoAddress::from(config.protocol_key_pair().public());
-        if let Some(network_address_overrides) = network_address_overrides.clone() {
-            let _ = network_address_overrides.get(&node_address).map_or((), |addresses| {
-                config.network_address = addresses.mgo_net_address.clone();
-                config.p2p_config.external_address = Some(addresses.p2p_address.clone());
-            });
+
+        // Apply network configuration overrides from epoch state config if present
+        if let Some(ref validators) = epoch_state_overrides.active_validators {
+            for validator_override in validators {
+                if validator_override.mgo_address == node_address {
+                    config.network_address = validator_override.mgo_net_address.clone();
+                    config.p2p_config.external_address = Some(validator_override.p2p_address.clone());
+                    break;
+                }
+            }
         }
+        let epoch_id = epoch_state_overrides.epoch;
         let epoch_path = AuthorityEpochTables::path(epoch_id, &config.db_path().join("store"));
         if !epoch_path.exists() {
             return Err(MgoError::Rollback("Cannot rollback too far".to_string()).into());
@@ -838,13 +869,20 @@ impl MgoNode {
 
         let mut epoch_start_configuration = perpetual_tables
             .get_epoch_start_configuration()?;
-        // Apply network address overrides if provided during rollback
-        let epoch_start_state = if let Some(ref overrides) = network_address_overrides {
-            info!("Applying network address overrides for {} validators", overrides.len());
-            apply_network_address_overrides(epoch_start_configuration.epoch_start_state(), overrides)?
-        } else {
-            epoch_start_configuration.epoch_start_state().clone()
-        };
+        let last_epoch_checkpoint = checkpoint_store
+            .get_epoch_last_checkpoint(epoch_id-1)?
+            .ok_or(MgoError::Rollback(
+                "Database corrupted for missing previous epoch's last checkpoint".to_string(),
+            ))?
+            .into_summary_and_sequence()
+            .1;
+        let last_epoch_checkpoint_digest = last_epoch_checkpoint.digest();
+        // Apply epoch state overrides if provided during rollback
+        let epoch_start_state = apply_epoch_state_overrides(
+            epoch_start_configuration.epoch_start_state(), 
+            epoch_state_overrides
+        );
+        epoch_start_configuration.set_epoch_digest(last_epoch_checkpoint_digest);
         epoch_start_configuration.set_system_state(epoch_start_state.clone());
         perpetual_tables.set_epoch_start_configuration(&epoch_start_configuration).await?;
         AuthorityPerEpochStore::rollback_to_epoch(
@@ -1821,38 +1859,41 @@ impl MgoNode {
     }
 }
 
-/// Apply network address overrides to epoch start system state
-/// This allows updating validator network addresses during rollback operations
-pub fn apply_network_address_overrides(
+/// Apply epoch state overrides to epoch start system state
+/// This allows updating epoch parameters and validator information during rollback operations
+pub fn apply_epoch_state_overrides(
     original_state: &EpochStartSystemState,
-    overrides: &HashMap<MgoAddress, NetworkAddressOverride>,
-) -> Result<EpochStartSystemState> {
-    
-    let mut modified_state = original_state.clone();
-    
-    // Get mutable access to validator infos
-    let validator_infos = modified_state.get_validators_mut();
-    for validator_info in validator_infos {
-        let validator_address = validator_info.mgo_address;
-        
-        if let Some(override_info) = overrides.get(&validator_address) {
-            info!(
-                "Applying network overrides for validator {}: updating addresses",
-                validator_address
-            );
-            
-            // Apply overrides for each address type if provided
-            validator_info.mgo_net_address = override_info.mgo_net_address.clone();
-            validator_info.p2p_address = override_info.p2p_address.clone();
-            validator_info.narwhal_primary_address = override_info.narwhal_primary_address.clone();
-            validator_info.narwhal_worker_address = override_info.narwhal_worker_address.clone();
-        }
-    }
-    
-    
-    Ok(modified_state)
-}
+    overrides: &EpochStateOverride,
+) -> EpochStartSystemState {
 
+    let mut modified_state = original_state.clone();
+    modified_state.set_epoch(overrides.epoch);
+    modified_state.set_epoch_start_timestamp_ms(Utc::now().timestamp_millis() as u64);
+    if let Some(reference_gas_price) = overrides.reference_gas_price {
+        info!("Overriding reference gas price to {}", reference_gas_price);
+        modified_state.set_reference_gas_price(reference_gas_price);
+    }
+    if let Some(safe_mode) = overrides.safe_mode {
+        info!("Overriding safe mode to {}", safe_mode);
+        modified_state.set_safe_mode(safe_mode);
+    }
+    if let Some(epoch_duration_ms) = overrides.epoch_duration_ms {
+        info!("Overriding epoch duration to {}", epoch_duration_ms);
+        modified_state.set_epoch_duration_ms(epoch_duration_ms);
+    }
+    if let Some(protocol_version) = overrides.protocol_version {
+        info!("Overriding protocol version from {} to {}", modified_state.protocol_version().as_u64(), protocol_version);
+        modified_state.set_protocol_version(protocol_version);
+    }
+
+    if let Some(ref validator_info) = overrides.active_validators {
+        info!("Overriding active validators");
+        modified_state.set_active_validators(validator_info.clone());
+    }
+
+    info!("Epoch state overrides applied successfully");
+    modified_state
+}
 
 /// Notify state-sync that a new list of trusted peers are now available.
 fn send_trusted_peer_change(

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::{ArgGroup, Parser};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +16,6 @@ use mgo_core::runtime::MgoRuntimes;
 use mgo_node::{self, metrics};
 use mgo_protocol_config::SupportedProtocolVersions;
 use mgo_telemetry::send_telemetry_event;
-use mgo_types::base_types::MgoAddress;
 use mgo_types::committee::EpochId;
 use mgo_types::messages_checkpoint::CheckpointSequenceNumber;
 use mgo_types::multiaddr::Multiaddr;
@@ -39,6 +37,7 @@ const GIT_REVISION: &str = {
 };
 const VERSION: &str = const_str::concat!(env!("CARGO_PKG_VERSION"), "-", GIT_REVISION);
 
+
 #[derive(Parser)]
 #[clap(rename_all = "kebab-case")]
 #[clap(name = env!("CARGO_BIN_NAME"))]
@@ -57,11 +56,8 @@ struct Args {
     #[clap(long, group = "exclusive")]
     run_with_range_checkpoint: Option<CheckpointSequenceNumber>,
 
-    #[clap(long, group = "exclusive", help = "Rollback to a specific epoch")]
-    rollback_to_epoch: Option<EpochId>,
-
-    #[clap(long, requires = "rollback_to_epoch", help = "Network address overrides file (JSON format) for rollback")]
-    network_overrides_file: Option<PathBuf>,
+    #[clap(long, group = "exclusive", help = "Epoch state overrides file (YAML format) for rollback")]
+    epoch_state_overrides_file: Option<PathBuf>,
 
 }
 
@@ -119,34 +115,30 @@ fn main() {
     );
 
     // Handle rollback if requested
-    if let Some(epoch_id) = args.rollback_to_epoch {
+    if let Some(epoch_state_overrides_file) = args.epoch_state_overrides_file {
 
-        info!("Starting rollback to epoch {}", epoch_id);
-        
-        let network_overrides = if let Some(overrides_file) = args.network_overrides_file {
-            let overrides_json = std::fs::read_to_string(&overrides_file)
-                .expect("Failed to read network overrides file");
-            let overrides: HashMap<MgoAddress, mgo_node::NetworkAddressOverride> = 
-                serde_json::from_str(&overrides_json)
-                .expect("Failed to parse network overrides JSON");
-            Some(overrides)
-        } else {
-            None
+        let epoch_state_overrides = {
+            let overrides_yaml = std::fs::read_to_string(&epoch_state_overrides_file)
+                .expect("Failed to read epoch state overrides file");
+            let overrides: mgo_node::EpochStateOverride =
+                serde_yaml::from_str(&overrides_yaml)
+                .expect("Failed to parse epoch state overrides YAML");
+            overrides
         };
+        info!("Starting rollback to epoch {}", epoch_state_overrides.epoch);
 
         // Execute rollback synchronously
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             mgo_node::MgoNode::rollback_by_epoch_async(
-                &config, 
-                epoch_id, 
-                network_overrides,
+                &config,
+                &epoch_state_overrides,
             )
                 .await
                 .expect("Rollback failed");
         });
-        
-        info!("Rollback to epoch {} completed successfully", epoch_id);
+
+        info!("Rollback to epoch {} completed successfully", epoch_state_overrides.epoch);
         return;
     }
 

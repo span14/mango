@@ -24,7 +24,6 @@ use crate::authority::authority_store_types::{
     get_store_object_pair, try_construct_object, ObjectContentDigest, StoreData,
     StoreMoveObjectWrapper, StoreObject, StoreObjectPair, StoreObjectValue, StoreObjectWrapper, StoreObjectV1
 };
-use mgo_types::mgo_system_state::epoch_start_mgo_system_state::EpochStartSystemState;
 use tracing::{info, warn};
 use typed_store_derive::DBMapUtils;
 
@@ -689,48 +688,21 @@ impl AuthorityPerpetualTables {
     ) -> MgoResult<()> {
         info!("Updating singleton tables for rollback to epoch {}", target_epoch);
 
-        let rollback_checkpoint = self.get_checkpoint_for_rollback(target_epoch, checkpoint_store)?;
+        let rollback_checkpoint = checkpoint_store
+            .get_epoch_last_checkpoint(target_epoch-1)?
+            .ok_or(MgoError::Rollback(
+                "Database corrupted for missing previous epoch's last checkpoint".to_string(),
+            ))?
+            .into_summary_and_sequence()
+            .1;
 
-        // 1. Keep epoch_start_configuration at epoch N
-        // According to the rollback requirements, we should KEEP the epoch_start_configuration
-        // at the target epoch, not rollback to a previous epoch. This ensures the system is
-        // configured for epoch N but with no execution data from epoch N.
-        if let Some(current_config) = self.epoch_start_configuration.get(&())? {
-            let current_epoch = current_config.epoch_start_state().epoch();
-            if current_epoch < target_epoch {
-                return Err(
-                    MgoError::Rollback(format!("Epoch start configuration at epoch {} is before target epoch {}", current_epoch, target_epoch))
-                );
-            } else {
-                // We need to recreate configuration for the target epoch
-                let updated_config = self.create_rollback_epoch_configuration(
-                    &current_config, 
-                    target_epoch,
-                    &rollback_checkpoint
-                )?;
-                
-                batch.insert_batch(&self.epoch_start_configuration, [((), updated_config)])?;
-                info!("Updated epoch_start_configuration to target epoch {}", target_epoch);
-            }
-        } else {
-            return Err(MgoError::Rollback(format!("Epoch start configuration is missing")));
-        }
-
-        // 2. Rollback pruned_checkpoint
+        // 1. Rollback pruned_checkpoint
         // We need to find the highest checkpoint sequence number that exists
         // after rollback. This requires checking what checkpoints will remain.
         // First, let's check if we have a current pruned checkpoint
         batch.insert_batch(&self.pruned_checkpoint, [((), rollback_checkpoint.sequence_number)])?;
 
-        // 3. Rollback expected_network_mgo_amount
-        // This value represents the total MGO in the network and should remain constant
-        // across epochs in normal operation. We log it but don't change it unless
-        // we have evidence of corruption.
-        if let Some(expected_amount) = self.expected_network_mgo_amount.get(&())? {
-            info!("Current expected_network_mgo_amount: {} (unchanged)", expected_amount);
-        }
-
-        // 4. Rollback expected_storage_fund_imbalance  
+        // 2. Rollback expected_storage_fund_imbalance  
         // This tracks the accumulated imbalance between storage fund balance and storage rebates.
         // When rolling back, we're removing transactions that may have contributed to this imbalance.
         // Calculate storage rebates from all removed transactions and adjust the imbalance.
@@ -758,157 +730,6 @@ impl AuthorityPerpetualTables {
         Ok(())
     }
 
-    fn create_rollback_epoch_configuration(
-        &self,
-        current_config: &EpochStartConfiguration,
-        target_epoch: EpochId,
-        rollback_checkpoint: &CheckpointSummary,
-    ) -> MgoResult<EpochStartConfiguration> {
-        let checkpoint_digest = rollback_checkpoint.digest();
-
-        match current_config {
-            EpochStartConfiguration::V5(v5) => {
-                // Create a new system state with the target epoch
-                let updated_system_state = self.create_rollback_system_state(
-                    v5.epoch_start_state(), 
-                    target_epoch
-                )?;
-                
-                // Find the epoch digest for the target epoch
-                // This should be the digest of the last checkpoint of (target_epoch - 1)
-                let mut new_epoch_state_configuration = v5.clone();
-                new_epoch_state_configuration.set_system_state(updated_system_state);
-                new_epoch_state_configuration.set_epoch_digest(checkpoint_digest); 
-                // Keep the same flags and object versions for now
-                // In a more complete implementation, these might need adjustment too
-                Ok(EpochStartConfiguration::V5(new_epoch_state_configuration))
-            }
-            EpochStartConfiguration::V4(v4) => {
-                let updated_system_state = self.create_rollback_system_state(
-                    v4.epoch_start_state(), 
-                    target_epoch
-                )?;
-                let mut new_epoch_state_configuration = v4.clone();
-                new_epoch_state_configuration.set_system_state(updated_system_state);
-                new_epoch_state_configuration.set_epoch_digest(checkpoint_digest);
-
-                Ok(EpochStartConfiguration::V4(new_epoch_state_configuration))
-            }
-            EpochStartConfiguration::V3(v3) => {
-                let updated_system_state = self.create_rollback_system_state(
-                    v3.epoch_start_state(), 
-                    target_epoch
-                )?;
-                let mut new_epoch_state_configuration = v3.clone();
-                new_epoch_state_configuration.set_system_state(updated_system_state);
-                new_epoch_state_configuration.set_epoch_digest(checkpoint_digest);
-
-                Ok(EpochStartConfiguration::V3(new_epoch_state_configuration))
-            }
-            EpochStartConfiguration::V2(v2) => {
-                let updated_system_state = self.create_rollback_system_state(
-                    v2.epoch_start_state(), 
-                    target_epoch
-                )?;
-                let mut new_epoch_state_configuration = v2.clone();
-                new_epoch_state_configuration.set_system_state(updated_system_state);
-                new_epoch_state_configuration.set_epoch_digest(checkpoint_digest);
-
-                Ok(EpochStartConfiguration::V2(new_epoch_state_configuration))
-            }
-            EpochStartConfiguration::V1(v1) => {
-                let updated_system_state = self.create_rollback_system_state(
-                    v1.epoch_start_state(), 
-                    target_epoch
-                )?;
-                let mut new_epoch_state_configuration = v1.clone();
-                new_epoch_state_configuration.set_system_state(updated_system_state);
-                new_epoch_state_configuration.set_epoch_digest(checkpoint_digest);
-
-                Ok(EpochStartConfiguration::V1(new_epoch_state_configuration))
-            }
-        }
-    }
-
-    fn create_rollback_system_state(
-        &self,
-        current_system_state: &EpochStartSystemState,
-        target_epoch: EpochId,
-    ) -> MgoResult<EpochStartSystemState> {
-        
-        match current_system_state {
-            EpochStartSystemState::V1(v1) => {
-                // Create a new system state with updated epoch
-                // We need to calculate appropriate timestamp for the target epoch
-                let target_timestamp = Utc::now().timestamp_millis() as u64;
-                let mut system_state = v1.clone();
-                system_state.set_epoch(target_epoch);
-                system_state.set_epoch_start_timestamp_ms(target_timestamp);
-                Ok(EpochStartSystemState::V1(system_state))
-            }
-        }
-    }
-
-    fn get_checkpoint_for_rollback(
-        &self, 
-        target_epoch: EpochId,
-        checkpoint_store: &CheckpointStore,
-    ) -> MgoResult<CheckpointSummary> {
-        if target_epoch == 0 {
-            // Genesis epoch has digest 0
-            let genesis = checkpoint_store.get_checkpoint_by_sequence_number(0)?;
-            if let Some(genesis) = genesis {
-                return Ok(genesis.into_summary_and_sequence().1);
-            } else {
-                // For testing: if we can't find the genesis checkpoint, return a test checkpoint
-                #[cfg(test)]
-                {
-                    return Ok(CheckpointSummary::new(
-                        0,
-                        0,
-                        0,
-                        &CheckpointContents::new_with_digests_only_for_tests(vec![]),
-                        None,
-                        GasCostSummary::default(),
-                        None,
-                        0
-                    ));
-                }
-                #[cfg(not(test))]
-                return Err(MgoError::Rollback(
-                    format!("Cannot find genesis checkpoint")
-                ));
-            }
-        }
-        
-        // For non-genesis epochs, we need the digest of the last checkpoint of the previous epoch
-        // Use the checkpoint store to get the actual checkpoint digest
-        let previous_epoch = target_epoch - 1;
-        
-        if let Some(last_checkpoint) = checkpoint_store.get_epoch_last_checkpoint(previous_epoch)? {
-            // Get the digest from the last checkpoint of the previous epoch
-            return Ok(last_checkpoint.into_summary_and_sequence().1);
-        } else {
-            // For testing: if we can't find the checkpoint, return a test checkpoint
-            #[cfg(test)]
-            {
-                return Ok(CheckpointSummary::new(
-                    previous_epoch,
-                    previous_epoch as CheckpointSequenceNumber,
-                    0,
-                    &CheckpointContents::new_with_digests_only_for_tests(vec![]),
-                    Some(CheckpointDigest::default()),
-                    GasCostSummary::default(),
-                    None,
-                    0,
-                ));
-            }
-            #[cfg(not(test))]
-            return Err(MgoError::Rollback(
-                format!("Cannot find last checkpoint of previous epoch {}", previous_epoch)
-            ));
-        }
-    }
 }
 
 impl ObjectStore for AuthorityPerpetualTables {

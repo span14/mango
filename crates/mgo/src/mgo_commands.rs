@@ -19,7 +19,7 @@ use std::{fs, io};
 use mgo_config::node::Genesis;
 use mgo_config::p2p::SeedPeer;
 use mgo_config::{
-    mgo_config_dir, Config, NodeConfig, PersistedConfig, FULL_NODE_DB_PATH, MGO_CLIENT_CONFIG,
+    mgo_config_dir, Config, PersistedConfig, FULL_NODE_DB_PATH, MGO_CLIENT_CONFIG,
     MGO_FULLNODE_CONFIG, MGO_NETWORK_CONFIG,
 };
 use mgo_config::{
@@ -35,8 +35,6 @@ use mgo_swarm_config::genesis_config::{GenesisConfig, DEFAULT_NUMBER_OF_AUTHORIT
 use mgo_swarm_config::network_config::NetworkConfig;
 use mgo_swarm_config::network_config_builder::ConfigBuilder;
 use mgo_swarm_config::node_config_builder::FullnodeConfigBuilder;
-use mgo_types::base_types::MgoAddress;
-use mgo_types::committee::EpochId;
 use mgo_types::crypto::{SignatureScheme, MgoKeyPair};
 use tracing::info;
 
@@ -156,22 +154,6 @@ pub enum MgoCommand {
     FireDrill {
         #[clap(subcommand)]
         fire_drill: FireDrill,
-    },
-
-    /// Rollback the blockchain state to a specific epoch
-    #[clap(name = "rollback")]
-    Rollback {
-        /// Path to the node configuration file
-        #[clap(long = "config-path")]
-        config_path: PathBuf,
-
-        /// Target epoch to rollback to
-        #[clap(long = "epoch")]
-        epoch_id: EpochId,
-
-        /// Optional network address overrides file (JSON format)
-        #[clap(long = "network-overrides")]
-        network_overrides_file: Option<PathBuf>,
     },
 }
 
@@ -338,32 +320,6 @@ impl MgoCommand {
                 cmd,
             } => execute_move_command(package_path, build_config, cmd),
             MgoCommand::FireDrill { fire_drill } => run_fire_drill(fire_drill).await,
-            MgoCommand::Rollback {
-                config_path,
-                epoch_id,
-                network_overrides_file,
-            } => {
-                info!("Starting rollback to epoch {}", epoch_id);
-                
-                // Load the node configuration
-                let config = NodeConfig::load(&config_path)?;
-                
-                // Load network overrides if provided
-                let network_overrides = if let Some(overrides_file) = network_overrides_file {
-                    let overrides_json = std::fs::read_to_string(&overrides_file)?;
-                    let overrides: std::collections::HashMap<MgoAddress, mgo_node::NetworkAddressOverride> = 
-                        serde_json::from_str(&overrides_json)?;
-                    Some(overrides)
-                } else {
-                    None
-                };
-                
-                // Execute the rollback
-                mgo_node::MgoNode::rollback_by_epoch_async(&config, epoch_id, network_overrides).await?;
-                
-                info!("Rollback to epoch {} completed successfully", epoch_id);
-                Ok(())
-            }
         }
     }
 }

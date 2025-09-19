@@ -32,6 +32,11 @@ pub trait EpochStartSystemStateTrait {
     fn get_narwhal_worker_cache(&self, transactions_address: &Multiaddr) -> WorkerCache;
     fn set_epoch(&mut self, epoch: EpochId);
     fn set_epoch_start_timestamp_ms(&mut self, epoch_start_timestamp_ms: u64);
+    fn set_protocol_version(&mut self, protocol_version: u64);
+    fn set_safe_mode(&mut self, safe_mode: bool);
+    fn set_reference_gas_price(&mut self, reference_gas_price: u64);
+    fn set_epoch_duration_ms(&mut self, epoch_duration_ms: u64);
+    fn set_active_validators(&mut self, active_validators: Vec<EpochStartValidatorInfoV1>);
 }
 
 /// This type captures the minimum amount of information from MgoSystemState needed by a validator
@@ -109,6 +114,10 @@ impl EpochStartSystemStateV1 {
 
     pub fn get_validators_mut(&mut self) -> &mut Vec<EpochStartValidatorInfoV1> {
         &mut self.active_validators
+    }
+
+    pub fn set_validators(&mut self, validators: Vec<EpochStartValidatorInfoV1>) {
+        self.active_validators = validators;
     }
 }
 
@@ -277,6 +286,26 @@ impl EpochStartSystemStateTrait for EpochStartSystemStateV1 {
 
     fn set_epoch_start_timestamp_ms(&mut self,epoch_start_timestamp_ms:u64) {
         self.epoch_start_timestamp_ms = epoch_start_timestamp_ms;
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: u64) {
+        self.protocol_version = protocol_version;
+    }
+
+    fn set_reference_gas_price(&mut self,reference_gas_price:u64) {
+        self.reference_gas_price = reference_gas_price;
+    }
+
+    fn set_safe_mode(&mut self,safe_mode:bool) {
+        self.safe_mode = safe_mode;
+    }
+    
+    fn set_epoch_duration_ms(&mut self,epoch_duration_ms:u64) {
+        self.epoch_duration_ms = epoch_duration_ms;
+    }
+
+    fn set_active_validators(&mut self,validators: Vec<EpochStartValidatorInfoV1>) {
+        self.active_validators = validators;
     }
 
 }
