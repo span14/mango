@@ -722,14 +722,14 @@ impl CheckpointStore {
             .flatten()
             .map(| ed | ed.transaction)
             .collect();
+        
+        if max_certified_checkpoint >= target_seq {
+            batch.schedule_delete_range(&self.certified_checkpoints, &(target_seq+1), &(max_certified_checkpoint+1))?;
+            info!("Added {} certified checkpoints to remove", max_certified_checkpoint - target_seq);
             
-        
-        // assert!(max_certified_checkpoint+1 >= target_seq+1);
-        batch.schedule_delete_range(&self.certified_checkpoints, &(target_seq+1), &(max_certified_checkpoint+1))?;
-        info!("Added {} certified checkpoints to remove", max_certified_checkpoint - target_seq);
-        
-        batch.delete_batch(&self.checkpoint_by_digest, &certified_checkpoint_digest_to_remove)?;
-        info!("Added {} certified checkpoint digests to remove", certified_checkpoint_digest_to_remove.len());
+            batch.delete_batch(&self.checkpoint_by_digest, &certified_checkpoint_digest_to_remove)?;
+            info!("Added {} certified checkpoint digests to remove", certified_checkpoint_digest_to_remove.len());
+        }
 
         // Remove state synced checkpoint after target sequence
         let max_state_synced_checkpoint = self.full_checkpoint_content
@@ -757,11 +757,13 @@ impl CheckpointStore {
             .flatten()
             .map(|ed| ed.transaction)
             .collect();
-
-        // assert!(max_state_synced_checkpoint+1 >= target_seq+1);
-        batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
-        info!("Added {} state synced checkpoints to remove", state_synced_checkpoint_to_remove.len());
         
+        if max_state_synced_checkpoint >= target_seq {
+            // assert!(max_state_synced_checkpoint+1 >= target_seq+1);
+            batch.schedule_delete_range(&self.full_checkpoint_content, &(target_seq+1), &(max_state_synced_checkpoint+1))?;
+            info!("Added {} state synced checkpoints to remove", state_synced_checkpoint_to_remove.len());
+        }
+
         // Remove locally computed checkpoints after target sequence
         let max_locally_computed_checkpoint = self.locally_computed_checkpoints
             .unbounded_iter()
@@ -789,9 +791,11 @@ impl CheckpointStore {
             .map(| ed | ed.transaction)
             .collect();
 
-        // assert!(max_locally_computed_checkpoint+1 >= target_seq+1);
-        batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
-        info!("Added {} locally computed checkpoints to remove", locally_computed_checkpoint_to_remove.len());
+        if max_locally_computed_checkpoint >= target_seq {
+            // assert!(max_locally_computed_checkpoint+1 >= target_seq+1);
+            batch.schedule_delete_range(&self.locally_computed_checkpoints, &(target_seq+1), &(max_locally_computed_checkpoint+1))?;
+            info!("Added {} locally computed checkpoints to remove", locally_computed_checkpoint_to_remove.len());
+        }
         
         let combined_checkpoint_content_digest = HashSet::<CheckpointContentsDigest>::from_iter(
             certified_checkpoint_content_digest_to_remove
@@ -815,9 +819,10 @@ impl CheckpointStore {
             .map(|(epoch_id, _)| epoch_id)
             .unwrap_or(target_epoch);
         
-        // assert!(max_epoch+1 >= target_epoch);
-        batch.schedule_delete_range(&self.epoch_last_checkpoint_map, &target_epoch, &(max_epoch+1))?;
-        info!("Added {} epochs to remove", max_epoch - target_epoch + 1);
+        if max_epoch >= target_epoch {
+            batch.schedule_delete_range(&self.epoch_last_checkpoint_map, &target_epoch, &(max_epoch+1))?;
+            info!("Added {} epochs to remove", max_epoch - target_epoch + 1);
+        }
         
         // Update watermarks to not exceed target checkpoint
         let mut watermark_update = vec![];
