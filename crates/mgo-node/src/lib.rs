@@ -22,14 +22,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-struct RollbackCheckpointAggregation {
-    checkpoint: CheckpointSummary,
-    content: FullCheckpointContents,
-    signatures: Vec<AuthoritySignInfo>,
-    epoch: u64,
-    timestamp: u64,
-}
 #[cfg(msim)]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -121,12 +113,9 @@ use mgo_storage::{FileCompression, IndexStore, StorageFormat};
 use mgo_types::base_types::{AuthorityName, EpochId, MgoAddress};
 use mgo_types::multiaddr::Multiaddr;
 use mgo_types::committee::{Committee, StakeUnit};
-use mgo_types::crypto::{AuthoritySignInfo, KeypairTraits};
+use mgo_types::crypto::KeypairTraits;
 use mgo_types::error::{MgoError, MgoResult};
 use mgo_types::executable_transaction::{CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction, };
-use mgo_types::messages_checkpoint::{
-    CheckpointSummary, FullCheckpointContents,
-};
 use mgo_types::messages_consensus::{
     check_total_jwk_size, AuthorityCapabilities, ConsensusTransaction,
 };
@@ -910,10 +899,27 @@ impl MgoNode {
                 }
             }
         }
-
-
         Ok(())
+    }
 
+    pub async fn set_configuration(
+        config: &NodeConfig,
+        epoch_state_overrides: &EpochStateOverride,
+    ) -> Result<()> {
+        let perpetual_options = default_db_options().optimize_db_for_write_throughput(4);
+        let perpetual_tables = Arc::new(AuthorityPerpetualTables::open(
+            &config.db_path().join("store"),
+            Some(perpetual_options.options),
+        ));
+        let mut epoch_start_configuration = perpetual_tables
+            .get_epoch_start_configuration()?;
+        let epoch_start_state = apply_epoch_state_overrides(
+            epoch_start_configuration.epoch_start_state(), 
+            epoch_state_overrides
+        );
+        epoch_start_configuration.set_system_state(epoch_start_state.clone());
+        perpetual_tables.set_epoch_start_configuration(&epoch_start_configuration).await?;
+        Ok(())
     }
 
     pub fn subscribe_to_epoch_change(&self) -> broadcast::Receiver<MgoSystemState> {

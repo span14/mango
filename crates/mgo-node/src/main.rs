@@ -59,6 +59,9 @@ struct Args {
     #[clap(long, group = "exclusive", help = "Epoch state overrides file (YAML format) for rollback")]
     epoch_state_overrides_file: Option<PathBuf>,
 
+    #[clap(long, requires = "epoch_state_overrides_file", help = "Only update configuration without performing rollback")]
+    config_update_only: bool,
+
 }
 
 fn main() {
@@ -114,7 +117,7 @@ fn main() {
         config.metrics_address
     );
 
-    // Handle rollback if requested
+    // Handle rollback or configuration update if requested
     if let Some(epoch_state_overrides_file) = args.epoch_state_overrides_file {
 
         let epoch_state_overrides = {
@@ -125,20 +128,34 @@ fn main() {
                 .expect("Failed to parse epoch state overrides YAML");
             overrides
         };
-        info!("Starting rollback to epoch {}", epoch_state_overrides.epoch);
 
-        // Execute rollback synchronously
+        // Execute operation synchronously
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            mgo_node::MgoNode::rollback_by_epoch_async(
-                &config,
-                &epoch_state_overrides,
-            )
-                .await
-                .expect("Rollback failed");
-        });
 
-        info!("Rollback to epoch {} completed successfully", epoch_state_overrides.epoch);
+        if args.config_update_only {
+            info!("Updating configuration for epoch {}", epoch_state_overrides.epoch);
+            runtime.block_on(async {
+                mgo_node::MgoNode::set_configuration(
+                    &config,
+                    &epoch_state_overrides,
+                )
+                    .await
+                    .expect("Configuration update failed");
+            });
+            info!("Configuration update for epoch {} completed successfully", epoch_state_overrides.epoch);
+        } else {
+            info!("Starting rollback to epoch {}", epoch_state_overrides.epoch);
+            runtime.block_on(async {
+                mgo_node::MgoNode::rollback_by_epoch_async(
+                    &config,
+                    &epoch_state_overrides,
+                )
+                    .await
+                    .expect("Rollback failed");
+            });
+            info!("Rollback to epoch {} completed successfully", epoch_state_overrides.epoch);
+        }
+
         return;
     }
 
